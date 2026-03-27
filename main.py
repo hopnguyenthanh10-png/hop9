@@ -404,4 +404,89 @@ async def cb_handler(e):
         supabase.table("users").update({"balance": user['balance'] - cost}).eq("user_id", uid).execute()
         res_text = f"✅ **MUA THÀNH CÔNG!** \n🎮 Game: {cat['name']}\n\n🔑 Code của bạn:\n"
         for c in stock:
-            supabase.table("codes").update({"sta
+            supabase.table("codes").update({"status": "sold"}).eq("id", c['id']).execute()
+            res_text += f"`{c['code']}`\n"
+        
+        await e.delete()
+        await bot.send_message(uid, res_text, buttons=[[TButton.inline("🔙 TRANG CHỦ", b"back")]])
+
+    elif data == "dep_menu":
+        btns = [[TButton.inline(f"💸 {a:,}đ", f"p_{a}") for a in [10000, 50000, 100000]], [TButton.inline("🔙 QUAY LẠI", b"back")]]
+        await e.edit("🏦 **CHỌN MỨC NẠP:** ", buttons=btns)
+
+    elif data.startswith("p_"):
+        amt = data.split("_")[1]
+        qr = f"https://img.vietqr.io/image/MSB-{STK_MSB}-compact2.png?amount={amt}&addInfo=NAP%20{uid}"
+        await e.edit(f"📥 Chuyển khoản **{int(amt):,}đ** \n📝 Nội dung: `{uid}`", buttons=[[TButton.url("MỞ APP QUÉT QR", qr)], [TButton.inline("🔙 QUAY LẠI", b"back")]])
+
+# ==================== LOGIC THÊM CLONE ====================
+@bot.on(events.CallbackQuery(data=b"add_clone"))
+async def add_clone_process(e):
+    uid = e.sender_id
+    if uid != ADMIN_ID: return
+    async with bot.conversation(uid) as conv:
+        await conv.send_message("📞 Số điện thoại (+84...):")
+        phone = (await conv.get_response()).text.strip()
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
+        await client.connect()
+        await client.send_code_request(phone)
+        await conv.send_message("📩 Nhập OTP:")
+        otp = (await conv.get_response()).text.strip()
+        try:
+            await client.sign_in(phone, otp)
+        except SessionPasswordNeededError:
+            await conv.send_message("🔐 Nhập 2FA:")
+            await client.sign_in(password=(await conv.get_response()).text.strip())
+        
+        ss = client.session.save()
+        supabase.table("my_clones").insert({"phone": phone, "session": ss}).execute()
+        await conv.send_message("✅ Đã thêm clone và bắt đầu chạy worker!")
+        asyncio.create_task(worker_grab_loop(client, phone))
+
+# ==================== WEBHOOK & NOTIFY ====================
+app = Flask(__name__)
+
+@app.route('/sepay-webhook', methods=['POST'])
+def webhook():
+    d = request.json
+    content = d.get("content", "").upper()
+    m = re.search(r'(\d{8,12})', content)
+    if m:
+        uid = int(m.group(1))
+        amt = int(d.get("transferAmount", 0))
+        user = db_get_user(uid)
+        new_bal = user['balance'] + amt
+        supabase.table("users").update({"balance": new_bal}).eq("user_id", uid).execute()
+        
+        # Gửi tin cho khách
+    asyncio.run_coroutine_threadsafe(bot.send_message(uid, f"✅ Đã nạp +{amt:,}đ. Số dư: {new_bal:,}đ"), loop)
+        
+        # Gửi thông báo vào kênh
+        channel_id = db_get_setting("NOTIFY_CHANNEL_ID", "")
+        if channel_id:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    bot.send_message(int(channel_id), f"💸 **THÔNG BÁO NẠP TIỀN** \n👤 ID: `{uid}`\n💰 Số tiền: **+{amt:,}đ** "), loop
+                )
+            except: pass
+    return jsonify({"status": "ok"}), 200
+
+async def main():
+    await bot.start(bot_token=BOT_TOKEN)
+    print("--- BOT ADMIN STARTED ---")
+    
+    # Load lại toàn bộ clone từ database
+    clones = supabase.table("my_clones").select("*").execute().data
+    for c in clones:
+        try:
+            cl = TelegramClient(StringSession(c['session']), API_ID, API_HASH)
+            asyncio.create_task(worker_grab_loop(cl, c['phone']))
+            print(f"Loaded clone: {c['phone']}")
+        except Exception as ex:
+            print(f"Lỗi load clone {c.get('phone')}: {ex}")
+            
+    await bot.run_until_disconnected()
+
+if __name__ == '__main__':
+    Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
+    loop.run_until_complete(main())
