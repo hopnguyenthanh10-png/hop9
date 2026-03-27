@@ -25,27 +25,36 @@ bot = TelegramClient(StringSession(), API_ID, API_HASH)
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
-# ==================== HELPER FUNCTIONS & DATABASE ====================
-def db_get_user(uid):
+# ==================== HELPER FUNCTIONS & DATABASE (NÂNG CẤP ASYNC) ====================
+# Đã chuyển thành Async để không block luồng Telegram
+async def db_get_user(uid):
+    res = await asyncio.to_thread(lambda: supabase.table("users").select("*").eq("user_id", uid).execute())
+    if not res.data:
+        await asyncio.to_thread(lambda: supabase.table("users").insert({"user_id": uid, "balance": 0}).execute())
+        return {"user_id": uid, "balance": 0}
+    return res.data[0]
+
+# Hàm db tĩnh dành riêng cho Flask Webhook (vì Flask chạy đồng bộ)
+def sync_db_get_user(uid):
     res = supabase.table("users").select("*").eq("user_id", uid).execute()
     if not res.data:
         supabase.table("users").insert({"user_id": uid, "balance": 0}).execute()
         return {"user_id": uid, "balance": 0}
     return res.data[0]
 
-def db_get_setting(key, default_value):
-    res = supabase.table("settings").select("value").eq("key", key).execute()
+async def db_get_setting(key, default_value):
+    res = await asyncio.to_thread(lambda: supabase.table("settings").select("value").eq("key", key).execute())
     if not res.data:
-        supabase.table("settings").insert({"key": key, "value": str(default_value)}).execute()
+        await asyncio.to_thread(lambda: supabase.table("settings").insert({"key": key, "value": str(default_value)}).execute())
         return str(default_value)
     return res.data[0]['value']
 
-def db_set_setting(key, value):
-    res = supabase.table("settings").select("value").eq("key", key).execute()
+async def db_set_setting(key, value):
+    res = await asyncio.to_thread(lambda: supabase.table("settings").select("value").eq("key", key).execute())
     if not res.data:
-        supabase.table("settings").insert({"key": key, "value": str(value)}).execute()
+        await asyncio.to_thread(lambda: supabase.table("settings").insert({"key": key, "value": str(value)}).execute())
     else:
-        supabase.table("settings").update({"value": str(value)}).eq("key", key).execute()
+        await asyncio.to_thread(lambda: supabase.table("settings").update({"value": str(value)}).eq("key", key).execute())
 
 # ==================== LOGIC ĐẬP HỘP ĐA DANH MỤC ====================
 async def worker_grab_loop(client, phone):
@@ -56,7 +65,8 @@ async def worker_grab_loop(client, phone):
             return
 
         try:
-            cats = supabase.table("categories").select("target_bot").execute().data
+            cats_res = await asyncio.to_thread(lambda: supabase.table("categories").select("target_bot").execute())
+            cats = cats_res.data
             if cats:
                 for c in cats:
                     if c.get('target_bot'):
@@ -77,10 +87,10 @@ async def worker_grab_loop(client, phone):
             chat_username = getattr(chat, 'username', '')
             if not chat_username: return
 
-            cats_res = supabase.table("categories").select("*").execute()
-            if not cats_res.data: return
+            cats_data = await asyncio.to_thread(lambda: supabase.table("categories").select("*").execute())
+            if not cats_data.data: return
             
-            matched_cat = next((c for c in cats_res.data if c.get('target_bot') and c['target_bot'].lower() == chat_username.lower()), None)
+            matched_cat = next((c for c in cats_data.data if c.get('target_bot') and c['target_bot'].lower() == chat_username.lower()), None)
             
             if matched_cat:
                 for row in ev.reply_markup.rows:
@@ -105,12 +115,12 @@ async def worker_grab_loop(client, phone):
                                             if m_match: code_found = m_match.group(1)
 
                                 if code_found:
-                                    supabase.table("codes").insert({
+                                    await asyncio.to_thread(lambda: supabase.table("codes").insert({
                                         "code": code_found, 
                                         "status": "available", 
                                         "source_phone": phone,
                                         "category_id": matched_cat['id']
-                                    }).execute()
+                                    }).execute())
                                     
                                     await bot.send_message(
                                         ADMIN_ID, 
@@ -125,8 +135,8 @@ async def worker_grab_loop(client, phone):
         logging.error(f"Worker {phone} dừng: {e}")
 
 # ==================== GIAO DIỆN NGƯỜI DÙNG ====================
-def main_menu_text(user):
-    bot_intro = db_get_setting("BOT_INTRO", "Chào mừng bạn đến với hệ thống bán code tự động!")
+async def main_menu_text(user):
+    bot_intro = await db_get_setting("BOT_INTRO", "Chào mừng bạn đến với hệ thống bán code tự động!")
     return (
         f"🤖 **HỆ THỐNG CỬA HÀNG CODE VIP** 🤖\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -147,15 +157,18 @@ def main_btns(uid):
 
 @bot.on(events.NewMessage(pattern="/start"))
 async def start(e):
-    user = db_get_user(e.sender_id)
-    await e.respond(main_menu_text(user), buttons=main_btns(e.sender_id))
+    user = await db_get_user(e.sender_id)
+    text = await main_menu_text(user)
+    await e.respond(text, buttons=main_btns(e.sender_id))
 
 @bot.on(events.CallbackQuery)
 async def cb_handler(e):
     uid, data = e.sender_id, e.data.decode()
 
     if data == "back":
-        await e.edit(main_menu_text(db_get_user(uid)), buttons=main_btns(uid))
+        user = await db_get_user(uid)
+        text = await main_menu_text(user)
+        await e.edit(text, buttons=main_btns(uid))
 
     elif data == "admin_menu":
         if uid != ADMIN_ID: return
@@ -168,7 +181,7 @@ async def cb_handler(e):
 
     elif data == "admin_clones":
         if uid != ADMIN_ID: return
-        res = supabase.table("my_clones").select("*").execute()
+        res = await asyncio.to_thread(lambda: supabase.table("my_clones").select("*").execute())
         btns = [[TButton.inline("➕ THÊM CLONE MỚI", b"add_clone")]]
         if res.data:
             for c in res.data:
@@ -178,9 +191,9 @@ async def cb_handler(e):
 
     elif data.startswith("del_clone_"):
         cid = data.split("_")[2]
-        supabase.table("my_clones").delete().eq("id", cid).execute()
+        await asyncio.to_thread(lambda: supabase.table("my_clones").delete().eq("id", cid).execute())
         await e.answer("✅ Đã xóa clone!", alert=True)
-        res = supabase.table("my_clones").select("*").execute()
+        res = await asyncio.to_thread(lambda: supabase.table("my_clones").select("*").execute())
         btns = [[TButton.inline("➕ THÊM CLONE MỚI", b"add_clone")]]
         if res.data:
             for c in res.data:
@@ -190,8 +203,8 @@ async def cb_handler(e):
 
     elif data == "admin_settings":
         if uid != ADMIN_ID: return
-        intro = db_get_setting("BOT_INTRO", "Chưa cài đặt")
-        channel = db_get_setting("NOTIFY_CHANNEL_ID", "Chưa cài đặt")
+        intro = await db_get_setting("BOT_INTRO", "Chưa cài đặt")
+        channel = await db_get_setting("NOTIFY_CHANNEL_ID", "Chưa cài đặt")
         txt = (f"⚙️ **CÀI ĐẶT HỆ THỐNG** \n\n"
                f"1️⃣ **Lời chào:** {intro}\n"
                f"2️⃣ **ID Kênh thông báo:** `{channel}`")
@@ -205,26 +218,27 @@ async def cb_handler(e):
         await e.delete()
         async with bot.conversation(uid) as conv:
             await conv.send_message("📝 Nhập lời chào mới:")
-            db_set_setting("BOT_INTRO", (await conv.get_response()).text.strip())
+            await db_set_setting("BOT_INTRO", (await conv.get_response()).text.strip())
             await conv.send_message("✅ Đã cập nhật!", buttons=[[TButton.inline("🔙 CÀI ĐẶT", b"admin_settings")]])
 
     elif data == "set_channel":
         await e.delete()
         async with bot.conversation(uid) as conv:
             await conv.send_message("📢 Nhập ID Kênh (Ví dụ: -100xxx):")
-            db_set_setting("NOTIFY_CHANNEL_ID", (await conv.get_response()).text.strip())
+            await db_set_setting("NOTIFY_CHANNEL_ID", (await conv.get_response()).text.strip())
             await conv.send_message("✅ Đã cập nhật!", buttons=[[TButton.inline("🔙 CÀI ĐẶT", b"admin_settings")]])
 
-    # [FIXED] Quản lý danh mục với count='exact' kết hợp limit(1) để không bị treo
+    # [FIXED & TỐI ƯU] Quản lý danh mục admin
     elif data == "admin_cats":
         if uid != ADMIN_ID: return
-        cats = supabase.table("categories").select("*").execute().data
+        cats_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").execute())
+        cats = cats_res.data
         if not cats:
             txt = "📂 **DANH SÁCH GAME CỦA SHOP** \n\n❌ Hiện tại kho chưa có game nào. Hãy thêm mới!"
         else:
             txt = "📂 **DANH SÁCH GAME CỦA SHOP** \n━━━━━━━━━━━━━━━━━━\n"
             for c in cats:
-                count_res = supabase.table("codes").select("id", count='exact').eq("category_id", c['id']).eq("status", "available").limit(1).execute()
+                count_res = await asyncio.to_thread(lambda: supabase.table("codes").select("id", count='exact').eq("category_id", c['id']).eq("status", "available").limit(1).execute())
                 stock = count_res.count if count_res.count is not None else 0
                 txt += f"🔸 **ID: `{c['id']}`** | **{c['name']}**\n"
                 txt += f"   ┣ 💵 Giá bán: {c['price']:,}đ\n"
@@ -250,7 +264,7 @@ async def cb_handler(e):
                 bot_target = (await conv.get_response()).text.strip().replace("@", "")
                 await conv.send_message("📝 Mô tả ngắn gọn:")
                 desc = (await conv.get_response()).text.strip()
-                supabase.table("categories").insert({"name": name, "price": price, "target_bot": bot_target, "description": desc}).execute()
+                await asyncio.to_thread(lambda: supabase.table("categories").insert({"name": name, "price": price, "target_bot": bot_target, "description": desc}).execute())
                 await conv.send_message(f"✅ Đã tạo: **{name}**", buttons=[[TButton.inline("🔙 DANH MỤC", b"admin_cats")]])
             except:
                 await conv.send_message("❌ Lỗi dữ liệu!", buttons=[[TButton.inline("🔙 DANH MỤC", b"admin_cats")]])
@@ -263,7 +277,7 @@ async def cb_handler(e):
                 cid = int((await conv.get_response()).text.strip())
                 await conv.send_message("💰 Nhập GIÁ MỚI:")
                 new_price = int((await conv.get_response()).text.strip())
-                supabase.table("categories").update({"price": new_price}).eq("id", cid).execute()
+                await asyncio.to_thread(lambda: supabase.table("categories").update({"price": new_price}).eq("id", cid).execute())
                 await conv.send_message("✅ Đã cập nhật giá!", buttons=[[TButton.inline("🔙 DANH MỤC", b"admin_cats")]])
             except: await conv.send_message("❌ Lỗi!")
 
@@ -273,8 +287,8 @@ async def cb_handler(e):
             await conv.send_message("🗑 Nhập ID game cần XÓA:")
             try:
                 cid = int((await conv.get_response()).text.strip())
-                supabase.table("codes").delete().eq("category_id", cid).execute()
-                supabase.table("categories").delete().eq("id", cid).execute()
+                await asyncio.to_thread(lambda: supabase.table("codes").delete().eq("category_id", cid).execute())
+                await asyncio.to_thread(lambda: supabase.table("categories").delete().eq("id", cid).execute())
                 await conv.send_message("✅ Đã xóa game!", buttons=[[TButton.inline("🔙 DANH MỤC", b"admin_cats")]])
             except: await conv.send_message("❌ Lỗi!")
 
@@ -289,7 +303,7 @@ async def cb_handler(e):
                 raw_codes = codes_msg.text.strip().split('\n')
                 insert_data = [{"code": c.strip(), "status": "available", "source_phone": "Admin", "category_id": cat_id} for c in raw_codes if c.strip()]
                 if insert_data:
-                    supabase.table("codes").insert(insert_data).execute()
+                    await asyncio.to_thread(lambda: supabase.table("codes").insert(insert_data).execute())
                     await conv.send_message(f"✅ Đã nạp {len(insert_data)} code!", buttons=[[TButton.inline("🔙 DANH MỤC", b"admin_cats")]])
             except: await conv.send_message("❌ Lỗi!")
 
@@ -301,21 +315,22 @@ async def cb_handler(e):
                 tid = int((await conv.get_response()).text.strip())
                 await conv.send_message("💰 Số tiền (VD: 5000 hoặc -5000):")
                 amt = int((await conv.get_response()).text.strip())
-                user = db_get_user(tid)
-                supabase.table("users").update({"balance": user['balance'] + amt}).eq("user_id", tid).execute()
+                user = await db_get_user(tid)
+                await asyncio.to_thread(lambda: supabase.table("users").update({"balance": user['balance'] + amt}).eq("user_id", tid).execute())
                 await conv.send_message("✅ Thành công!", buttons=[[TButton.inline("🔙 ADMIN", b"admin_menu")]])
             except: await conv.send_message("❌ Lỗi!")
 
-    # ==================== MENU KHÁCH HÀNG ====================
+    # ==================== MENU KHÁCH HÀNG (FIXED TREO NÚT) ====================
     elif data == "history":
         await e.edit("🕒 Tìm tin nhắn `MUA THÀNH CÔNG` để xem lại code.", buttons=[[TButton.inline("🔙 QUAY LẠI", b"back")]])
 
     elif data == "list_categories":
-        cats = supabase.table("categories").select("*").execute().data
+        cats_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").execute())
+        cats = cats_res.data
         if not cats: return await e.answer("Chưa có danh mục!", alert=True)
         btns = []
         for c in cats:
-            count_res = supabase.table("codes").select("id", count='exact').eq("category_id", c['id']).eq("status", "available").limit(1).execute()
+            count_res = await asyncio.to_thread(lambda: supabase.table("codes").select("id", count='exact').eq("category_id", c['id']).eq("status", "available").limit(1).execute())
             stock = count_res.count if count_res.count is not None else 0
             status = f"Kho: {stock}" if stock > 0 else "🔴 HẾT HÀNG"
             btns.append([TButton.inline(f"🎮 {c['name']} - {c['price']:,}đ ({status})", f"vcat_{c['id']}")])
@@ -324,8 +339,9 @@ async def cb_handler(e):
 
     elif data.startswith("vcat_"):
         cid = int(data.split("_")[1])
-        cat = supabase.table("categories").select("*").eq("id", cid).execute().data[0]
-        count_res = supabase.table("codes").select("id", count='exact').eq("category_id", cid).eq("status", "available").limit(1).execute()
+        cat_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").eq("id", cid).execute())
+        cat = cat_res.data[0]
+        count_res = await asyncio.to_thread(lambda: supabase.table("codes").select("id", count='exact').eq("category_id", cid).eq("status", "available").limit(1).execute())
         stock = count_res.count if count_res.count is not None else 0
         txt = (f"🎮 **{cat['name']}** \n━━━━━━━━━━━━\n📝 {cat['description']}\n\n"
                f"💵 Giá: **{cat['price']:,}đ** \n📦 Tồn kho: **{stock}** code")
@@ -336,21 +352,27 @@ async def cb_handler(e):
 
     elif data.startswith("buycustom_"):
         cid = int(data.split("_")[1])
-        cat = supabase.table("categories").select("*").eq("id", cid).execute().data[0]
+        cat_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").eq("id", cid).execute())
+        cat = cat_res.data[0]
         await e.delete()
         async with bot.conversation(uid) as conv:
             await conv.send_message(f"🛒 Game: **{cat['name']}**. Nhập số lượng cần mua:")
             try:
                 qty = int((await conv.get_response()).text.strip())
-                user = db_get_user(uid)
+                user = await db_get_user(uid)
                 cost = cat['price'] * qty
                 if user['balance'] < cost: return await conv.send_message("❌ Không đủ tiền!", buttons=[[TButton.inline("🔙 DANH MỤC", b"list_categories")]])
-                stock_data = supabase.table("codes").select("*").eq("category_id", cid).eq("status", "available").limit(qty).execute().data
+                
+                stock_res = await asyncio.to_thread(lambda: supabase.table("codes").select("*").eq("category_id", cid).eq("status", "available").limit(qty).execute())
+                stock_data = stock_res.data
+                
                 if len(stock_data) < qty: return await conv.send_message("❌ Kho không đủ!", buttons=[[TButton.inline("🔙 DANH MỤC", b"list_categories")]])
-                supabase.table("users").update({"balance": user['balance'] - cost}).eq("user_id", uid).execute()
+                
+                await asyncio.to_thread(lambda: supabase.table("users").update({"balance": user['balance'] - cost}).eq("user_id", uid).execute())
+                
                 res_text = f"✅ **MUA THÀNH CÔNG {qty} CODE!**\n"
                 for c in stock_data:
-                    supabase.table("codes").update({"status": "sold"}).eq("id", c['id']).execute()
+                    await asyncio.to_thread(lambda: supabase.table("codes").update({"status": "sold"}).eq("id", c['id']).execute())
                     res_text += f"`{c['code']}`\n"
                 await conv.send_message(res_text, buttons=[[TButton.inline("🔙 TRANG CHỦ", b"back")]])
             except: await conv.send_message("❌ Lỗi số lượng!")
@@ -358,17 +380,25 @@ async def cb_handler(e):
     elif data.startswith("buy_"):
         _, cid, qty = data.split("_")
         cid, qty = int(cid), int(qty)
-        cat = supabase.table("categories").select("*").eq("id", cid).execute().data[0]
-        user = db_get_user(uid)
+        cat_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").eq("id", cid).execute())
+        cat = cat_res.data[0]
+        user = await db_get_user(uid)
         cost = cat['price'] * qty
+        
         if user['balance'] < cost: return await e.answer("❌ Không đủ tiền!", alert=True)
-        stock = supabase.table("codes").select("*").eq("category_id", cid).eq("status", "available").limit(qty).execute().data
+        
+        stock_res = await asyncio.to_thread(lambda: supabase.table("codes").select("*").eq("category_id", cid).eq("status", "available").limit(qty).execute())
+        stock = stock_res.data
+        
         if len(stock) < qty: return await e.answer("❌ Hết hàng!", alert=True)
-        supabase.table("users").update({"balance": user['balance'] - cost}).eq("user_id", uid).execute()
+        
+        await asyncio.to_thread(lambda: supabase.table("users").update({"balance": user['balance'] - cost}).eq("user_id", uid).execute())
+        
         res_text = f"✅ **MUA THÀNH CÔNG!**\n"
         for c in stock:
-            supabase.table("codes").update({"status": "sold"}).eq("id", c['id']).execute()
+            await asyncio.to_thread(lambda: supabase.table("codes").update({"status": "sold"}).eq("id", c['id']).execute())
             res_text += f"`{c['code']}`\n"
+            
         await e.delete()
         await bot.send_message(uid, res_text, buttons=[[TButton.inline("🔙 TRANG CHỦ", b"back")]])
 
@@ -400,7 +430,7 @@ async def add_clone_process(e):
             await conv.send_message("🔐 Nhập 2FA:")
             await client.sign_in(password=(await conv.get_response()).text.strip())
         ss = client.session.save()
-        supabase.table("my_clones").insert({"phone": phone, "session": ss}).execute()
+        await asyncio.to_thread(lambda: supabase.table("my_clones").insert({"phone": phone, "session": ss}).execute())
         await conv.send_message("✅ Đã thêm clone!")
         asyncio.create_task(worker_grab_loop(client, phone))
 
@@ -412,7 +442,7 @@ def webhook():
     m = re.search(r'(\d{8,12})', d.get("content", "").upper())
     if m:
         uid, amt = int(m.group(1)), int(d.get("transferAmount", 0))
-        user = db_get_user(uid)
+        user = sync_db_get_user(uid)
         supabase.table("users").update({"balance": user['balance'] + amt}).eq("user_id", uid).execute()
         asyncio.run_coroutine_threadsafe(bot.send_message(uid, f"✅ Nạp +{amt:,}đ thành công!"), loop)
     return jsonify({"status": "ok"}), 200
@@ -420,12 +450,14 @@ def webhook():
 async def main():
     await bot.start(bot_token=BOT_TOKEN)
     print("--- BOT STARTED ---")
-    clones = supabase.table("my_clones").select("*").execute().data
-    for c in clones:
-        try:
-            cl = TelegramClient(StringSession(c['session']), API_ID, API_HASH)
-            asyncio.create_task(worker_grab_loop(cl, c['phone']))
-        except: pass
+    clones_res = await asyncio.to_thread(lambda: supabase.table("my_clones").select("*").execute())
+    clones = clones_res.data
+    if clones:
+        for c in clones:
+            try:
+                cl = TelegramClient(StringSession(c['session']), API_ID, API_HASH)
+                asyncio.create_task(worker_grab_loop(cl, c['phone']))
+            except: pass
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
