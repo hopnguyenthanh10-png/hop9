@@ -55,6 +55,21 @@ async def worker_grab_loop(client, phone):
             logging.error(f"Clone {phone} die session.")
             return
 
+        # NÂNG CẤP: Tự động gửi /start cho tất cả bot mục tiêu khi clone khởi động
+        # Để đảm bảo clone đã mở phiên chat với bot, nếu không sẽ không bắt được sự kiện
+        try:
+            cats = supabase.table("categories").select("target_bot").execute().data
+            if cats:
+                for c in cats:
+                    if c.get('target_bot'):
+                        try:
+                            await client.send_message(c['target_bot'], "/start")
+                            await asyncio.sleep(1.5) # Delay tránh spam
+                        except Exception as start_err:
+                            logging.warning(f"Clone {phone} không thể start {c['target_bot']}: {start_err}")
+        except Exception as e:
+            logging.error(f"Lỗi khi auto-start bot mục tiêu cho {phone}: {e}")
+
         @client.on(events.NewMessage())
         @client.on(events.MessageEdited())
         async def handler(ev):
@@ -224,6 +239,47 @@ async def cb_handler(e):
         ]
         await e.edit(txt, buttons=btns)
 
+    # NÂNG CẤP: Thêm logic hoàn chỉnh cho nút SỬA GIÁ danh mục
+    elif data == "edit_cat_price":
+        if uid != ADMIN_ID: return
+        await e.delete()
+        async with bot.conversation(uid) as conv:
+            cats = supabase.table("categories").select("*").execute().data
+            if not cats:
+                return await conv.send_message("❌ Chưa có danh mục nào!", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_cats")]])
+            
+            await conv.send_message("✏️ **Nhập ID danh mục cần sửa giá:**")
+            try:
+                cid = int((await conv.get_response()).text.strip())
+                cat_exists = next((c for c in cats if c['id'] == cid), None)
+                if not cat_exists:
+                    return await conv.send_message("❌ ID không tồn tại!", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_cats")]])
+                
+                await conv.send_message(f"💰 Nhập giá mới cho **{cat_exists['name']}** (Giá cũ: {cat_exists['price']}đ):")
+                new_price = int((await conv.get_response()).text.strip())
+                
+                supabase.table("categories").update({"price": new_price}).eq("id", cid).execute()
+                await conv.send_message(f"✅ Đã cập nhật giá mới: {new_price:,}đ", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
+            except ValueError:
+                await conv.send_message("❌ Vui lòng nhập số hợp lệ!", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
+
+    # NÂNG CẤP: Thêm logic hoàn chỉnh cho nút XÓA danh mục
+    elif data == "del_cat":
+        if uid != ADMIN_ID: return
+        await e.delete()
+        async with bot.conversation(uid) as conv:
+            cats = supabase.table("categories").select("*").execute().data
+            if not cats:
+                return await conv.send_message("❌ Chưa có danh mục nào!", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_cats")]])
+                
+            await conv.send_message("🗑 **Nhập ID danh mục cần xóa:**\n*(Lưu ý: Xóa danh mục sẽ xóa toàn bộ code bên trong)*")
+            try:
+                cid = int((await conv.get_response()).text.strip())
+                supabase.table("categories").delete().eq("id", cid).execute()
+                await conv.send_message("✅ Đã xóa danh mục thành công!", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
+            except ValueError:
+                await conv.send_message("❌ Vui lòng nhập số hợp lệ!", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
+
     elif data == "add_manual_codes":
         if uid != ADMIN_ID: return
         await e.delete()
@@ -342,7 +398,7 @@ async def cb_handler(e):
             [TButton.inline("🛒 MUA 1 CODE", f"buy_{cid}_1")],
             [TButton.inline("🛒 MUA NHIỀU (TÙY CHỌN)", f"buycustom_{cid}")],
             [TButton.inline("🔙 DANH MỤC", b"list_categories")]
-        ]
+            ]
         await e.edit(txt, buttons=btns)
 
     elif data.startswith("buycustom_"):
@@ -459,7 +515,7 @@ def webhook():
         supabase.table("users").update({"balance": new_bal}).eq("user_id", uid).execute()
         
         # Gửi tin cho khách
-    asyncio.run_coroutine_threadsafe(bot.send_message(uid, f"✅ Đã nạp +{amt:,}đ. Số dư: {new_bal:,}đ"), loop)
+        asyncio.run_coroutine_threadsafe(bot.send_message(uid, f"✅ Đã nạp +{amt:,}đ. Số dư: {new_bal:,}đ"), loop)
         
         # Gửi thông báo vào kênh
         channel_id = db_get_setting("NOTIFY_CHANNEL_ID", "")
