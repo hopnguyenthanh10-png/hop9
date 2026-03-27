@@ -1,4 +1,6 @@
 import asyncio, re, os, random, logging
+import urllib.request
+import time
 from datetime import datetime, timezone
 from threading import Thread
 from flask import Flask, request, jsonify
@@ -26,7 +28,6 @@ loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
 # ==================== HELPER FUNCTIONS & DATABASE (NÂNG CẤP ASYNC) ====================
-# Đã chuyển thành Async để không block luồng Telegram
 async def db_get_user(uid):
     res = await asyncio.to_thread(lambda: supabase.table("users").select("*").eq("user_id", uid).execute())
     if not res.data:
@@ -34,7 +35,6 @@ async def db_get_user(uid):
         return {"user_id": uid, "balance": 0}
     return res.data[0]
 
-# Hàm db tĩnh dành riêng cho Flask Webhook (vì Flask chạy đồng bộ)
 def sync_db_get_user(uid):
     res = supabase.table("users").select("*").eq("user_id", uid).execute()
     if not res.data:
@@ -166,11 +166,13 @@ async def cb_handler(e):
     uid, data = e.sender_id, e.data.decode()
 
     if data == "back":
+        await e.answer() # Tắt thông báo tải
         user = await db_get_user(uid)
         text = await main_menu_text(user)
         await e.edit(text, buttons=main_btns(uid))
 
     elif data == "admin_menu":
+        await e.answer() # Tắt thông báo tải
         if uid != ADMIN_ID: return
         btns = [
             [TButton.inline("📂 QUẢN LÝ DANH MỤC", b"admin_cats"), TButton.inline("📱 QUẢN LÝ CLONE", b"admin_clones")],
@@ -180,6 +182,7 @@ async def cb_handler(e):
         await e.edit("👨‍💻 **BẢNG ĐIỀU KHIỂN ADMIN** ", buttons=btns)
 
     elif data == "admin_clones":
+        await e.answer()
         if uid != ADMIN_ID: return
         res = await asyncio.to_thread(lambda: supabase.table("my_clones").select("*").execute())
         btns = [[TButton.inline("➕ THÊM CLONE MỚI", b"add_clone")]]
@@ -202,6 +205,7 @@ async def cb_handler(e):
         await e.edit(f"📱 **QUẢN LÝ CLONE ({len(res.data)} acc)** ", buttons=btns)
 
     elif data == "admin_settings":
+        await e.answer()
         if uid != ADMIN_ID: return
         intro = await db_get_setting("BOT_INTRO", "Chưa cài đặt")
         channel = await db_get_setting("NOTIFY_CHANNEL_ID", "Chưa cài đặt")
@@ -215,6 +219,7 @@ async def cb_handler(e):
         await e.edit(txt, buttons=btns)
 
     elif data == "set_intro":
+        await e.answer()
         await e.delete()
         async with bot.conversation(uid) as conv:
             await conv.send_message("📝 Nhập lời chào mới:")
@@ -222,14 +227,15 @@ async def cb_handler(e):
             await conv.send_message("✅ Đã cập nhật!", buttons=[[TButton.inline("🔙 CÀI ĐẶT", b"admin_settings")]])
 
     elif data == "set_channel":
+        await e.answer()
         await e.delete()
         async with bot.conversation(uid) as conv:
             await conv.send_message("📢 Nhập ID Kênh (Ví dụ: -100xxx):")
             await db_set_setting("NOTIFY_CHANNEL_ID", (await conv.get_response()).text.strip())
             await conv.send_message("✅ Đã cập nhật!", buttons=[[TButton.inline("🔙 CÀI ĐẶT", b"admin_settings")]])
 
-    # [FIXED & TỐI ƯU] Quản lý danh mục admin
     elif data == "admin_cats":
+        await e.answer()
         if uid != ADMIN_ID: return
         cats_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").execute())
         cats = cats_res.data
@@ -253,6 +259,7 @@ async def cb_handler(e):
         await e.edit(txt, buttons=btns)
 
     elif data == "add_cat":
+        await e.answer()
         await e.delete()
         async with bot.conversation(uid) as conv:
             await conv.send_message("🎮 Nhập Tên Game Mới:")
@@ -270,6 +277,7 @@ async def cb_handler(e):
                 await conv.send_message("❌ Lỗi dữ liệu!", buttons=[[TButton.inline("🔙 DANH MỤC", b"admin_cats")]])
 
     elif data == "edit_cat_price":
+        await e.answer()
         await e.delete()
         async with bot.conversation(uid) as conv:
             await conv.send_message("✏️ Nhập ID game cần sửa giá:")
@@ -282,6 +290,7 @@ async def cb_handler(e):
             except: await conv.send_message("❌ Lỗi!")
 
     elif data == "del_cat":
+        await e.answer()
         await e.delete()
         async with bot.conversation(uid) as conv:
             await conv.send_message("🗑 Nhập ID game cần XÓA:")
@@ -293,6 +302,7 @@ async def cb_handler(e):
             except: await conv.send_message("❌ Lỗi!")
 
     elif data == "add_manual_codes":
+        await e.answer()
         await e.delete()
         async with bot.conversation(uid) as conv:
             await conv.send_message("📦 Nhập ID Danh mục để thêm code:")
@@ -308,6 +318,7 @@ async def cb_handler(e):
             except: await conv.send_message("❌ Lỗi!")
 
     elif data == "admin_money":
+        await e.answer()
         await e.delete()
         async with bot.conversation(uid) as conv:
             await conv.send_message("👤 Nhập ID khách:")
@@ -320,14 +331,15 @@ async def cb_handler(e):
                 await conv.send_message("✅ Thành công!", buttons=[[TButton.inline("🔙 ADMIN", b"admin_menu")]])
             except: await conv.send_message("❌ Lỗi!")
 
-    # ==================== MENU KHÁCH HÀNG (FIXED TREO NÚT) ====================
     elif data == "history":
+        await e.answer()
         await e.edit("🕒 Tìm tin nhắn `MUA THÀNH CÔNG` để xem lại code.", buttons=[[TButton.inline("🔙 QUAY LẠI", b"back")]])
 
     elif data == "list_categories":
         cats_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").execute())
         cats = cats_res.data
         if not cats: return await e.answer("Chưa có danh mục!", alert=True)
+        await e.answer() # Nếu có danh mục thì tắt xoay ngay
         btns = []
         for c in cats:
             count_res = await asyncio.to_thread(lambda: supabase.table("codes").select("id", count='exact').eq("category_id", c['id']).eq("status", "available").limit(1).execute())
@@ -338,6 +350,7 @@ async def cb_handler(e):
         await e.edit("🛒 **DANH SÁCH GAME ĐANG BÁN:**", buttons=btns)
 
     elif data.startswith("vcat_"):
+        await e.answer()
         cid = int(data.split("_")[1])
         cat_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").eq("id", cid).execute())
         cat = cat_res.data[0]
@@ -351,6 +364,7 @@ async def cb_handler(e):
         await e.edit(txt, buttons=btns)
 
     elif data.startswith("buycustom_"):
+        await e.answer()
         cid = int(data.split("_")[1])
         cat_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").eq("id", cid).execute())
         cat = cat_res.data[0]
@@ -399,14 +413,17 @@ async def cb_handler(e):
             await asyncio.to_thread(lambda: supabase.table("codes").update({"status": "sold"}).eq("id", c['id']).execute())
             res_text += f"`{c['code']}`\n"
             
+        await e.answer() # Tắt xoay nếu chạy tới đây
         await e.delete()
         await bot.send_message(uid, res_text, buttons=[[TButton.inline("🔙 TRANG CHỦ", b"back")]])
 
     elif data == "dep_menu":
+        await e.answer()
         btns = [[TButton.inline(f"💸 {a:,}đ", f"p_{a}") for a in [10000, 50000, 100000]], [TButton.inline("🔙 QUAY LẠI", b"back")]]
         await e.edit("🏦 **CHỌN MỨC NẠP:** ", buttons=btns)
 
     elif data.startswith("p_"):
+        await e.answer()
         amt = data.split("_")[1]
         qr = f"https://img.vietqr.io/image/MSB-{STK_MSB}-compact2.png?amount={amt}&addInfo=NAP%20{uid}"
         await e.edit(f"📥 CK **{int(amt):,}đ**. ND: `{uid}`", buttons=[[TButton.url("MỞ QR", qr)], [TButton.inline("🔙 QUAY LẠI", b"back")]])
@@ -414,6 +431,7 @@ async def cb_handler(e):
 # ==================== LOGIC THÊM CLONE ====================
 @bot.on(events.CallbackQuery(data=b"add_clone"))
 async def add_clone_process(e):
+    await e.answer()
     uid = e.sender_id
     if uid != ADMIN_ID: return
     async with bot.conversation(uid) as conv:
@@ -434,8 +452,14 @@ async def add_clone_process(e):
         await conv.send_message("✅ Đã thêm clone!")
         asyncio.create_task(worker_grab_loop(client, phone))
 
-# ==================== WEBHOOK & MAIN ====================
+# ==================== WEBHOOK & KEEP-ALIVE (TREO 24/7) ====================
 app = Flask(__name__)
+
+# Route thêm vào để xác nhận server đang sống
+@app.route('/', methods=['GET'])
+def home():
+    return "Bot is running 24/7!", 200
+
 @app.route('/sepay-webhook', methods=['POST'])
 def webhook():
     d = request.json
@@ -446,6 +470,15 @@ def webhook():
         supabase.table("users").update({"balance": user['balance'] + amt}).eq("user_id", uid).execute()
         asyncio.run_coroutine_threadsafe(bot.send_message(uid, f"✅ Nạp +{amt:,}đ thành công!"), loop)
     return jsonify({"status": "ok"}), 200
+
+# Hàm chạy ngầm ping liên tục để Render không ngủ
+def keep_alive_ping():
+    while True:
+        try:
+            urllib.request.urlopen("http://127.0.0.1:10000/")
+        except Exception:
+            pass
+        time.sleep(120) # Gửi yêu cầu mỗi 2 phút
 
 async def main():
     await bot.start(bot_token=BOT_TOKEN)
@@ -461,5 +494,7 @@ async def main():
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
+    # Khởi động luồng chạy ngầm chống ngủ
+    Thread(target=keep_alive_ping, daemon=True).start()
     Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
     loop.run_until_complete(main())
