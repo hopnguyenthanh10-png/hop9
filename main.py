@@ -188,7 +188,6 @@ async def cb_handler(e):
         cid = data.split("_")[2]
         supabase.table("my_clones").delete().eq("id", cid).execute()
         await e.answer("✅ Đã xóa clone!", alert=True)
-        # Quay lại menu clone
         res = supabase.table("my_clones").select("*").execute()
         btns = [[TButton.inline("➕ THÊM CLONE MỚI", b"add_clone")]]
         if res.data:
@@ -224,22 +223,51 @@ async def cb_handler(e):
             db_set_setting("NOTIFY_CHANNEL_ID", (await conv.get_response()).text.strip())
             await conv.send_message("✅ Đã cập nhật!", buttons=[[TButton.inline("🔙 CÀI ĐẶT", b"admin_settings")]])
 
+    # [NÂNG CẤP VÀ SỬA LỖI] - Giao diện Quản lý danh mục chuyên nghiệp, bắt lỗi chuẩn
     elif data == "admin_cats":
         if uid != ADMIN_ID: return
         cats = supabase.table("categories").select("*").execute().data
-        txt = "📂 **DANH SÁCH DANH MỤC** \n\n"
-        for c in cats:
-            stock = len(supabase.table("codes").select("id").eq("category_id", c['id']).eq("status", "available").execute().data)
-            txt += f"🔸 ID `{c['id']}`: {c['name']} | Giá: {c['price']}đ | Kho: {stock} code\n"
+        
+        if not cats:
+            txt = "📂 **DANH SÁCH GAME CỦA SHOP** \n\n❌ Hiện tại kho chưa có game nào. Hãy thêm mới!"
+        else:
+            txt = "📂 **DANH SÁCH GAME CỦA SHOP** \n━━━━━━━━━━━━━━━━━━\n"
+            for c in cats:
+                stock = len(supabase.table("codes").select("id").eq("category_id", c['id']).eq("status", "available").execute().data)
+                txt += f"🔸 **ID: `{c['id']}`** | **{c['name']}**\n"
+                txt += f"   ┣ 💵 Giá bán: {c['price']:,}đ\n"
+                txt += f"   ┣ 🤖 Bot check: @{c['target_bot']}\n"
+                txt += f"   ┗ 📦 Tồn kho: {stock} code\n"
+                txt += "━━━━━━━━━━━━━━━━━━\n"
         
         btns = [
-            [TButton.inline("➕ THÊM DANH MỤC", b"add_cat"), TButton.inline("📦 THÊM CODE TAY", b"add_manual_codes")],
-            [TButton.inline("✏️ SỬA GIÁ", b"edit_cat_price"), TButton.inline("🗑 XÓA", b"del_cat")],
-            [TButton.inline("🔙 QUAY LẠI", b"admin_menu")]
+            [TButton.inline("➕ THÊM GAME MỚI", b"add_cat"), TButton.inline("📦 THÊM CODE TAY", b"add_manual_codes")],
+            [TButton.inline("✏️ SỬA GIÁ BÁN", b"edit_cat_price"), TButton.inline("🗑 XÓA GAME", b"del_cat")],
+            [TButton.inline("🔙 QUAY LẠI ADMIN", b"admin_menu")]
         ]
         await e.edit(txt, buttons=btns)
 
-    # NÂNG CẤP: Thêm logic hoàn chỉnh cho nút SỬA GIÁ danh mục
+    elif data == "add_cat":
+        await e.delete()
+        async with bot.conversation(uid) as conv:
+            await conv.send_message("🎮 Nhập Tên Game Mới:")
+            name = (await conv.get_response()).text.strip()
+            
+            await conv.send_message("💰 Nhập Giá bán (Ví dụ: 10000 - Vui lòng chỉ nhập số):")
+            try:
+                price = int((await conv.get_response()).text.strip())
+            except ValueError:
+                return await conv.send_message("❌ Lỗi: Giá bán phải là một số! Vui lòng thao tác lại.", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
+                
+            await conv.send_message("🤖 Username Bot Đập Hộp (Bỏ qua ký tự @, ví dụ: nhan_code_bot):")
+            bot_target = (await conv.get_response()).text.strip().replace("@", "")
+            
+            await conv.send_message("📝 Mô tả ngắn gọn về game:")
+            desc = (await conv.get_response()).text.strip()
+            
+            supabase.table("categories").insert({"name": name, "price": price, "target_bot": bot_target, "description": desc}).execute()
+            await conv.send_message(f"✅ Đã tạo thành công danh mục: **{name}**", buttons=[[TButton.inline("🔙 DANH MỤC", b"admin_cats")]])
+
     elif data == "edit_cat_price":
         if uid != ADMIN_ID: return
         await e.delete()
@@ -248,22 +276,21 @@ async def cb_handler(e):
             if not cats:
                 return await conv.send_message("❌ Chưa có danh mục nào!", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_cats")]])
             
-            await conv.send_message("✏️ **Nhập ID danh mục cần sửa giá:**")
+            await conv.send_message("✏️ **Nhập ID game cần sửa giá:**")
             try:
                 cid = int((await conv.get_response()).text.strip())
                 cat_exists = next((c for c in cats if c['id'] == cid), None)
                 if not cat_exists:
-                    return await conv.send_message("❌ ID không tồn tại!", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_cats")]])
+                    return await conv.send_message("❌ Lỗi: ID Game không tồn tại!", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
                 
-                await conv.send_message(f"💰 Nhập giá mới cho **{cat_exists['name']}** (Giá cũ: {cat_exists['price']}đ):")
+                await conv.send_message(f"💰 Nhập GIÁ MỚI cho game **{cat_exists['name']}** (Giá cũ đang là: {cat_exists['price']:,}đ):")
                 new_price = int((await conv.get_response()).text.strip())
                 
                 supabase.table("categories").update({"price": new_price}).eq("id", cid).execute()
-                await conv.send_message(f"✅ Đã cập nhật giá mới: {new_price:,}đ", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
+                await conv.send_message(f"✅ Đã cập nhật giá mới cho **{cat_exists['name']}**: {new_price:,}đ", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
             except ValueError:
-                await conv.send_message("❌ Vui lòng nhập số hợp lệ!", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
+                await conv.send_message("❌ Lỗi: Bạn vừa nhập chữ thay vì số. Vui lòng thao tác lại!", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
 
-    # NÂNG CẤP: Thêm logic hoàn chỉnh cho nút XÓA danh mục
     elif data == "del_cat":
         if uid != ADMIN_ID: return
         await e.delete()
@@ -272,13 +299,21 @@ async def cb_handler(e):
             if not cats:
                 return await conv.send_message("❌ Chưa có danh mục nào!", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_cats")]])
                 
-            await conv.send_message("🗑 **Nhập ID danh mục cần xóa:**\n*(Lưu ý: Xóa danh mục sẽ xóa toàn bộ code bên trong)*")
+            await conv.send_message("🗑 **Nhập ID game cần XÓA BỎ:**\n*(Lưu ý: Hệ thống sẽ tự động quét và dọn sạch toàn bộ code nằm trong game này để tránh lỗi sập bot)*")
             try:
                 cid = int((await conv.get_response()).text.strip())
+                cat_exists = next((c for c in cats if c['id'] == cid), None)
+                if not cat_exists:
+                    return await conv.send_message("❌ Lỗi: ID Game không tồn tại!", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
+
+                # [FIX LỖI CRASH] Bắt buộc xóa hết Code của Game đó trước khi xóa Game để tránh lỗi ràng buộc Database
+                supabase.table("codes").delete().eq("category_id", cid).execute()
+                # Sau đó mới xóa Game
                 supabase.table("categories").delete().eq("id", cid).execute()
-                await conv.send_message("✅ Đã xóa danh mục thành công!", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
+                
+                await conv.send_message(f"✅ Đã xóa vĩnh viễn game **{cat_exists['name']}** và dọn sạch code bên trong!", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
             except ValueError:
-                await conv.send_message("❌ Vui lòng nhập số hợp lệ!", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
+                await conv.send_message("❌ Lỗi: Vui lòng nhập ID là một con số!", buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]])
 
     elif data == "add_manual_codes":
         if uid != ADMIN_ID: return
@@ -300,7 +335,7 @@ async def cb_handler(e):
                 cat_id_msg = await conv.get_response()
                 cat_id = int(cat_id_msg.text.strip())
             except ValueError:
-                await conv.send_message("❌ ID danh mục phải là số!", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_cats")]])
+                await conv.send_message("❌ Lỗi: ID danh mục phải là số!", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_cats")]])
                 return
 
             cat_exists = next((c for c in cats if c['id'] == cat_id), None)
@@ -316,7 +351,6 @@ async def cb_handler(e):
             
             codes_msg = await conv.get_response()
             raw_codes = codes_msg.text.strip().split('\n')
-            
             valid_codes = [c.strip() for c in raw_codes if c.strip()]
             
             if not valid_codes:
@@ -324,46 +358,29 @@ async def cb_handler(e):
                 return
             
             insert_data = [
-                {
-                    "code": code,
-                    "status": "available",
-                    "source_phone": "Admin_Manual",
-                    "category_id": cat_id
-                } for code in valid_codes
+                {"code": code, "status": "available", "source_phone": "Admin_Manual", "category_id": cat_id} 
+                for code in valid_codes
             ]
             
             supabase.table("codes").insert(insert_data).execute()
-            
             await conv.send_message(
                 f"✅ **THÀNH CÔNG!** \nĐã nạp thêm **{len(valid_codes)}** code vào danh mục **{cat_exists['name']}** .", 
                 buttons=[[TButton.inline("🔙 QUẢN LÝ DANH MỤC", b"admin_cats")]]
             )
 
-    elif data == "add_cat":
-        await e.delete()
-        async with bot.conversation(uid) as conv:
-            await conv.send_message("🎮 Tên Game:")
-            name = (await conv.get_response()).text.strip()
-            await conv.send_message("💰 Giá bán:")
-            price = int((await conv.get_response()).text.strip())
-            await conv.send_message("🤖 Username Bot Đập Hộp (không @):")
-            bot_target = (await conv.get_response()).text.strip()
-            await conv.send_message("📝 Mô tả ngắn:")
-            desc = (await conv.get_response()).text.strip()
-            
-            supabase.table("categories").insert({"name": name, "price": price, "target_bot": bot_target, "description": desc}).execute()
-            await conv.send_message("✅ Đã thêm danh mục!", buttons=[[TButton.inline("🔙 DANH MỤC", b"admin_cats")]])
-
     elif data == "admin_money":
         await e.delete()
         async with bot.conversation(uid) as conv:
             await conv.send_message("👤 Nhập ID khách:")
-            tid = int((await conv.get_response()).text.strip())
-            await conv.send_message("💰 Số tiền cộng/trừ (VD: 5000 hoặc -5000):")
-            amt = int((await conv.get_response()).text.strip())
-            user = db_get_user(tid)
-            supabase.table("users").update({"balance": user['balance'] + amt}).eq("user_id", tid).execute()
-            await conv.send_message("✅ Thành công!", buttons=[[TButton.inline("🔙 ADMIN", b"admin_menu")]])
+            try:
+                tid = int((await conv.get_response()).text.strip())
+                await conv.send_message("💰 Số tiền cộng/trừ (VD: 5000 hoặc -5000):")
+                amt = int((await conv.get_response()).text.strip())
+                user = db_get_user(tid)
+                supabase.table("users").update({"balance": user['balance'] + amt}).eq("user_id", tid).execute()
+                await conv.send_message("✅ Thành công!", buttons=[[TButton.inline("🔙 ADMIN", b"admin_menu")]])
+            except ValueError:
+                await conv.send_message("❌ Vui lòng nhập số hợp lệ!", buttons=[[TButton.inline("🔙 ADMIN", b"admin_menu")]])
 
     # ==================== MENU KHÁCH HÀNG ====================
     elif data == "history":
@@ -374,21 +391,29 @@ async def cb_handler(e):
         )
         await e.edit(txt, buttons=[[TButton.inline("🔙 QUAY LẠI", b"back")]])
 
+    # [NÂNG CẤP HIỂN THỊ KHÁCH HÀNG] - Tự hiện "HẾT HÀNG" nếu kho bằng 0
     elif data == "list_categories":
         cats = supabase.table("categories").select("*").execute().data
         if not cats: return await e.answer("Chưa có danh mục nào!", alert=True)
-        # Bổ sung tính số lượng kho ngay ngoài danh mục để khách thấy rõ
+        
         btns = []
         for c in cats:
             stock = len(supabase.table("codes").select("id").eq("category_id", c['id']).eq("status", "available").execute().data)
-            btns.append([TButton.inline(f"🎮 {c['name']} ({c['price']:,}đ) - Kho: {stock}", f"vcat_{c['id']}")])
+            status_text = f"Kho: {stock}" if stock > 0 else "🔴 HẾT HÀNG"
+            btns.append([TButton.inline(f"🎮 {c['name']} - {c['price']:,}đ ({status_text})", f"vcat_{c['id']}")])
         
         btns.append([TButton.inline("🔙 QUAY LẠI", b"back")])
-        await e.edit("🛒 **CHỌN LOẠI GAME MUỐN MUA:** \n*(Click vào tên game để xem chi tiết và chọn số lượng)*", buttons=btns)
+        await e.edit("🛒 **DANH SÁCH GAME ĐANG BÁN:** \n*(Click vào tên game để xem chi tiết và mua hàng)*", buttons=btns)
 
     elif data.startswith("vcat_"):
         cid = int(data.split("_")[1])
-        cat = supabase.table("categories").select("*").eq("id", cid).execute().data[0]
+        cat_query = supabase.table("categories").select("*").eq("id", cid).execute().data
+        
+        # [FIX LỖI KHÁCH HÀNG ẤN NÚT CŨ KHI GAME ĐÃ BỊ XÓA]
+        if not cat_query:
+            return await e.answer("❌ Danh mục game này đã ngừng bán hoặc bị xóa!", alert=True)
+            
+        cat = cat_query[0]
         stock = len(supabase.table("codes").select("id").eq("category_id", cid).eq("status", "available").execute().data)
         txt = (f"🎮 **{cat['name']}** \n━━━━━━━━━━━━\n"
                f"📝 {cat['description']}\n\n"
@@ -398,12 +423,14 @@ async def cb_handler(e):
             [TButton.inline("🛒 MUA 1 CODE", f"buy_{cid}_1")],
             [TButton.inline("🛒 MUA NHIỀU (TÙY CHỌN)", f"buycustom_{cid}")],
             [TButton.inline("🔙 DANH MỤC", b"list_categories")]
-            ]
+        ]
         await e.edit(txt, buttons=btns)
 
     elif data.startswith("buycustom_"):
         cid = int(data.split("_")[1])
-        cat = supabase.table("categories").select("*").eq("id", cid).execute().data[0]
+        cat_query = supabase.table("categories").select("*").eq("id", cid).execute().data
+        if not cat_query: return await e.answer("❌ Game này không còn tồn tại!", alert=True)
+        cat = cat_query[0]
         stock = len(supabase.table("codes").select("id").eq("category_id", cid).eq("status", "available").execute().data)
         
         await e.delete()
@@ -420,7 +447,7 @@ async def cb_handler(e):
                     await conv.send_message("❌ Số lượng không hợp lệ (Phải lớn hơn 0)!", buttons=[[TButton.inline("🔙 TRỞ VỀ DANH MỤC", b"list_categories")]])
                     return
             except ValueError:
-                await conv.send_message("❌ Bạn phải nhập một con số!", buttons=[[TButton.inline("🔙 TRỞ VỀ DANH MỤC", b"list_categories")]])
+                await conv.send_message("❌ Lỗi: Bạn phải nhập một con số!", buttons=[[TButton.inline("🔙 TRỞ VỀ DANH MỤC", b"list_categories")]])
                 return
             
             user = db_get_user(uid)
@@ -447,7 +474,10 @@ async def cb_handler(e):
     elif data.startswith("buy_"):
         _, cid, qty = data.split("_")
         cid, qty = int(cid), int(qty)
-        cat = supabase.table("categories").select("*").eq("id", cid).execute().data[0]
+        cat_query = supabase.table("categories").select("*").eq("id", cid).execute().data
+        if not cat_query: return await e.answer("❌ Game này không còn tồn tại!", alert=True)
+        cat = cat_query[0]
+        
         user = db_get_user(uid)
         cost = cat['price'] * qty
         
