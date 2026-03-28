@@ -5,7 +5,7 @@ import random
 import logging
 import urllib.request
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from threading import Thread
 from flask import Flask, request, jsonify
 from telethon import TelegramClient, events, Button as TButton
@@ -65,6 +65,17 @@ async def db_get_setting(key, default_value):
         logging.error(f"Lỗi db_get_setting: {e}")
         return str(default_value)
 
+def sync_db_get_setting(key, default_value):
+    try:
+        res = supabase.table("settings").select("value").eq("key", key).execute()
+        if not res.data:
+            supabase.table("settings").insert({"key": key, "value": str(default_value)}).execute()
+            return str(default_value)
+        return res.data[0]['value']
+    except Exception as e:
+        logging.error(f"Lỗi sync_db_get_setting: {e}")
+        return str(default_value)
+
 async def db_set_setting(key, value):
     try:
         res = await asyncio.to_thread(lambda: supabase.table("settings").select("value").eq("key", key).execute())
@@ -74,6 +85,51 @@ async def db_set_setting(key, value):
             await asyncio.to_thread(lambda: supabase.table("settings").update({"value": str(value)}).eq("key", key).execute())
     except Exception as e:
         logging.error(f"Lỗi db_set_setting: {e}")
+
+# ==================== LOGIC THÔNG BÁO KÊNH & LỊCH SỬ ====================
+async def send_channel_notify(text):
+    channel_id_str = await db_get_setting("NOTIFY_CHANNEL_ID", "Chưa cài đặt")
+    if channel_id_str and channel_id_str != "Chưa cài đặt":
+        try:
+            await bot.send_message(int(channel_id_str), text)
+        except Exception as e:
+            logging.error(f"Lỗi gửi thông báo kênh: {e}")
+
+def sync_send_channel_notify(text):
+    channel_id_str = sync_db_get_setting("NOTIFY_CHANNEL_ID", "Chưa cài đặt")
+    if channel_id_str and channel_id_str != "Chưa cài đặt":
+        try:
+            asyncio.run_coroutine_threadsafe(bot.send_message(int(channel_id_str), text), loop)
+        except Exception as e:
+            logging.error(f"Lỗi gửi thông báo kênh sync: {e}")
+
+async def db_add_history(uid, action, game_name, qty, amount):
+    try:
+        now_str = datetime.now(timezone.utc).isoformat()
+        await asyncio.to_thread(lambda: supabase.table("history").insert({
+            "user_id": uid, "action": action, "game_name": game_name, "qty": qty, "amount": amount, "created_at": now_str
+        }).execute())
+    except Exception as e:
+        logging.error(f"Lỗi lưu lịch sử: {e}")
+
+def sync_db_add_history(uid, action, game_name, qty, amount):
+    try:
+        now_str = datetime.now(timezone.utc).isoformat()
+        supabase.table("history").insert({
+            "user_id": uid, "action": action, "game_name": game_name, "qty": qty, "amount": amount, "created_at": now_str
+        }).execute()
+    except Exception as e:
+        logging.error(f"Lỗi lưu lịch sử sync: {e}")
+
+async def auto_clean_history():
+    while True:
+        try:
+            # Xóa các lịch sử cũ hơn 24 giờ
+            yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+            await asyncio.to_thread(lambda: supabase.table("history").delete().lt("created_at", yesterday).execute())
+        except Exception as e:
+            logging.error(f"Lỗi tự động xóa lịch sử cũ: {e}")
+        await asyncio.sleep(3600) # Cứ 1 tiếng quét 1 lần
 
 # ==================== LOGIC ĐẬP HỘP ĐA DANH MỤC ====================
 async def worker_grab_loop(client, phone):
@@ -178,7 +234,7 @@ async def main_menu_text(user):
 def main_btns(uid):
     btns = [
         [TButton.inline("🛒 DANH MỤC GAME", b"list_categories")],
-        [TButton.inline("🏦 NẠP TIỀN", b"dep_menu"), TButton.inline("🕒 LỊCH SỬ MUA", b"history")],
+        [TButton.inline("🏦 NẠP TIỀN", b"dep_menu"), TButton.inline("🕒 LỊCH SỬ GIAO DỊCH", b"history")],
     ]
     if uid == ADMIN_ID:
         btns.append([TButton.inline("👑 QUẢN TRỊ ADMIN", b"admin_menu")])
@@ -210,9 +266,40 @@ async def cb_handler(e):
         btns = [
             [TButton.inline("📂 QUẢN LÝ DANH MỤC", b"admin_cats"), TButton.inline("📱 QUẢN LÝ CLONE", b"admin_clones")],
             [TButton.inline("⚙️ CÀI ĐẶT CHUNG", b"admin_settings"), TButton.inline("💰 CỘNG/TRỪ TIỀN", b"admin_money")],
+            [TButton.inline("🕵️ CHECK LỊCH SỬ GD", b"admin_check_history")],
             [TButton.inline("🔙 TRANG CHỦ", b"back")]
         ]
         await e.edit("👨‍💻 **BẢNG ĐIỀU KHIỂN ADMIN** ", buttons=btns)
+
+    # XỬ LÝ ADMIN CHECK LỊCH SỬ
+    elif data == "admin_check_history":
+        await e.answer()
+        await e.delete()
+        async with bot.conversation(uid) as conv:
+            try:
+                await conv.send_message("🕵️ Nhập ID khách hàng cần kiểm tra lịch sử:")
+                check_uid = int((await conv.get_response()).text.strip())
+                
+                res = await asyncio.to_thread(lambda: supabase.table("history").select("*").eq("user_id", check_uid).order("created_at", desc=True).limit(20).execute())
+                if not res.data:
+                    await conv.send_message(f"❌ Khách hàng `{check_uid}` không có giao dịch nào trong 24h qua.", buttons=[[TButton.inline("🔙 QUAY LẠI ADMIN", b"admin_menu")]])
+                    return
+                
+                txt = f"🕵️ **LỊCH SỬ CỦA USER: `{check_uid}`**\n━━━━━━━━━━━━━━━━━━\n"
+                for h in res.data:
+                    dt = datetime.fromisoformat(h['created_at'].replace('Z', '+00:00'))
+                    time_str = dt.astimezone().strftime('%H:%M %d/%m')
+                    if h['action'] == "Nạp tiền":
+                        txt += f"🔹 `{time_str}` | Nạp tiền: **+{h['amount']:,}đ**\n"
+                    else:
+                        txt += f"🔸 `{time_str}` | Mua {h['qty']} code {h['game_name']} **(-{h['amount']:,}đ)**\n"
+                
+                await conv.send_message(txt, buttons=[[TButton.inline("🔙 QUAY LẠI ADMIN", b"admin_menu")]])
+            except ValueError:
+                await conv.send_message("❌ ID phải là số!", buttons=[[TButton.inline("🔙 QUAY LẠI ADMIN", b"admin_menu")]])
+            except Exception as ex:
+                logging.error(f"Lỗi admin check lịch sử: {ex}")
+                await conv.send_message("❌ Lỗi truy xuất cơ sở dữ liệu!", buttons=[[TButton.inline("🔙 QUAY LẠI ADMIN", b"admin_menu")]])
 
     # XỬ LÝ QUẢN LÝ CLONE
     elif data == "admin_clones":
@@ -302,7 +389,6 @@ async def cb_handler(e):
             else:
                 txt = "📂 **DANH SÁCH GAME CỦA SHOP** \n━━━━━━━━━━━━━━━━━━\n"
                 for c in cats:
-                    # Bọc Try/Except khi đếm số lượng để không bị sập nếu bảng Code bị lỗi
                     try:
                         count_res = await asyncio.to_thread(lambda: supabase.table("codes").select("id", count='exact').eq("category_id", c['id']).eq("status", "available").limit(1).execute())
                         stock = count_res.count if count_res.count is not None else 0
@@ -378,7 +464,6 @@ async def cb_handler(e):
                 await conv.send_message("🗑 Nhập ID game cần XÓA BỎ HOÀN TOÀN:")
                 cid = int((await conv.get_response()).text.strip())
                 
-                # Phải xóa codes thuộc về category này trước để tránh lỗi khóa ngoại (Foreign key)
                 await asyncio.to_thread(lambda: supabase.table("codes").delete().eq("category_id", cid).execute())
                 await asyncio.to_thread(lambda: supabase.table("categories").delete().eq("id", cid).execute())
                 
@@ -439,10 +524,32 @@ async def cb_handler(e):
                 logging.error(f"Lỗi cộng tiền admin: {ex}")
                 await conv.send_message("❌ Lỗi cơ sở dữ liệu!")
 
-    # XỬ LÝ LỊCH SỬ VÀ DANH MỤC BÁN HÀNG
+    # XỬ LÝ LỊCH SỬ CHO THÀNH VIÊN
     elif data == "history":
         await e.answer()
-        await e.edit("🕒 Để xem lại lịch sử mua code, vui lòng vuốt lên và tìm các tin nhắn có chữ `MUA THÀNH CÔNG` do bot gửi nhé.", buttons=[[TButton.inline("🔙 QUAY LẠI", b"back")]])
+        try:
+            res = await asyncio.to_thread(lambda: supabase.table("history").select("*").eq("user_id", uid).order("created_at", desc=True).limit(10).execute())
+            hist_data = res.data
+            
+            if not hist_data:
+                await e.edit("🕒 Bạn chưa có giao dịch nào trong 24h qua.", buttons=[[TButton.inline("🔙 QUAY LẠI", b"back")]])
+                return
+            
+            txt = "🕒 **LỊCH SỬ GIAO DỊCH CỦA BẠN (24H QUA)**\n━━━━━━━━━━━━━━━━━━\n"
+            for h in hist_data:
+                dt = datetime.fromisoformat(h['created_at'].replace('Z', '+00:00'))
+                time_str = dt.astimezone().strftime('%H:%M %d/%m')
+                
+                if h['action'] == "Nạp tiền":
+                    txt += f"🔹 `{time_str}` | Nạp tiền: **+{h['amount']:,}đ**\n"
+                else:
+                    txt += f"🔸 `{time_str}` | Mua **{h['qty']}** code **{h['game_name']}** (-{h['amount']:,}đ)\n"
+            
+            txt += "━━━━━━━━━━━━━━━━━━\n*(Lịch sử sẽ tự động xóa sau 24h)*"
+            await e.edit(txt, buttons=[[TButton.inline("🔙 QUAY LẠI", b"back")]])
+        except Exception as ex:
+            logging.error(f"Lỗi xem lịch sử: {ex}")
+            await e.edit("❌ Lỗi tải lịch sử, vui lòng thử lại.", buttons=[[TButton.inline("🔙 QUAY LẠI", b"back")]])
 
     elif data == "list_categories":
         await e.answer()
@@ -504,13 +611,12 @@ async def cb_handler(e):
             logging.error(f"Lỗi vcat_: {ex}")
             await e.edit("❌ Lỗi truy xuất thông tin game.", buttons=[[TButton.inline("🔙", b"list_categories")]])
 
-    # ---------------- BỔ SUNG ĐOẠN "MUA 1 CODE" BỊ MẤT ----------------
     elif data.startswith("buy_"):
         await e.answer()
         try:
             parts = data.split("_")
             cid = int(parts[1])
-            qty = int(parts[2]) # Mặc định là 1 từ nút MUA 1 CODE
+            qty = int(parts[2]) 
             
             cat_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").eq("id", cid).execute())
             if not cat_res.data:
@@ -532,22 +638,32 @@ async def cb_handler(e):
                 await bot.send_message(uid, "❌ Rất tiếc, trong kho không còn đủ code bạn cần!")
                 return
             
-            # Trừ tiền trước cho chắc ăn
+            # Trừ tiền 
             await asyncio.to_thread(lambda: supabase.table("users").update({"balance": user['balance'] - cost}).eq("user_id", uid).execute())
             
+            # Lưu lịch sử & Gửi thông báo Kênh
+            await db_add_history(uid, "Mua Code", cat['name'], qty, cost)
+            await send_channel_notify(
+                f"🛒 **GIAO DỊCH MUA CODE THÀNH CÔNG**\n"
+                f"👤 Người mua: `{uid}`\n"
+                f"🎮 Game: **{cat['name']}**\n"
+                f"📦 Số lượng: **{qty} code**\n"
+                f"💰 Tổng bill: **-{cost:,}đ**\n"
+                f"✅ *(Hệ thống chỉ báo số lượng, không hiển thị code)*"
+            )
+
             # Nhả code
             res_text = f"✅ **MUA THÀNH CÔNG!**\n\n"
             for c in stock_data:
                 await asyncio.to_thread(lambda: supabase.table("codes").update({"status": "sold"}).eq("id", c['id']).execute())
                 res_text += f"🎮 Game {cat['name']}: `{c['code']}`\n"
                 
-            await e.delete() # Xóa tin nhắn menu
+            await e.delete() 
             await bot.send_message(uid, res_text, buttons=[[TButton.inline("🔙 QUAY LẠI TRANG CHỦ", b"back")]])
         except Exception as ex:
             logging.error(f"Lỗi mua 1 code: {ex}")
             await bot.send_message(uid, "❌ Đã xảy ra lỗi hệ thống khi mua hàng!")
 
-    # ---------------- FIX LỖI THỤT LỀ Ở MUA NHIỀU ----------------
     elif data.startswith("buycustom_"):
         await e.answer()
         try:
@@ -588,6 +704,17 @@ async def cb_handler(e):
                     # Trừ tiền
                     await asyncio.to_thread(lambda: supabase.table("users").update({"balance": user['balance'] - cost}).eq("user_id", uid).execute())
             
+                    # Lưu lịch sử & Gửi thông báo Kênh
+                    await db_add_history(uid, "Mua Code", cat['name'], qty, cost)
+                    await send_channel_notify(
+                        f"🛒 **GIAO DỊCH MUA CODE THÀNH CÔNG**\n"
+                        f"👤 Người mua: `{uid}`\n"
+                        f"🎮 Game: **{cat['name']}**\n"
+                        f"📦 Số lượng: **{qty} code**\n"
+                        f"💰 Tổng bill: **-{cost:,}đ**\n"
+                        f"✅ *(Hệ thống chỉ báo số lượng, không hiển thị code)*"
+                    )
+
                     # Gom code và gửi
                     res_text = f"✅ **MUA THÀNH CÔNG {qty} CODE!**\n\n"
                     for c in stock_data:
@@ -608,9 +735,9 @@ async def cb_handler(e):
     elif data == "dep_menu":
         await e.answer()
         btns = [
-            [TButton.inline("💸 Nạp 10,000đ", "p_10000")],
-            [TButton.inline("💸 Nạp 50,000đ", "p_50000")],
-            [TButton.inline("💸 Nạp 100,000đ", "p_100000")],
+            [TButton.inline("💸 Nạp 10,000đ", "p_10000"), TButton.inline("💸 Nạp 20,000đ", "p_20000")],
+            [TButton.inline("💸 Nạp 30,000đ", "p_30000"), TButton.inline("💸 Nạp 50,000đ", "p_50000")],
+            [TButton.inline("💸 Nạp 100,000đ", "p_100000"), TButton.inline("💸 Nạp 200,000đ", "p_200000")],
             [TButton.inline("🔙 QUAY LẠI TRANG CHỦ", b"back")]
         ]
         await e.edit("🏦 **VUI LÒNG CHỌN MỨC TIỀN MUỐN NẠP:** ", buttons=btns)
@@ -626,7 +753,6 @@ async def cb_handler(e):
                f"📝 Nội dung chuyển khoản (BẮT BUỘC): `NAP {uid}`\n\n"
                f"*(Vui lòng bấm nút mở mã QR bên dưới hoặc chuyển khoản đúng nội dung để được cộng tiền tự động 24/7)*")
         await e.edit(txt, buttons=[[TButton.url("🖼 BẤM VÀO ĐÂY ĐỂ MỞ MÃ QR", qr)], [TButton.inline("🔙 QUAY LẠI", b"dep_menu")]])
-
 
 # ==================== LOGIC THÊM CLONE ====================
 @bot.on(events.CallbackQuery(data=b"add_clone"))
@@ -686,6 +812,10 @@ def webhook():
             new_balance = user['balance'] + amt
             supabase.table("users").update({"balance": new_balance}).eq("user_id", uid).execute()
             
+            # Lưu lịch sử nạp tiền & Bắn thông báo kênh
+            sync_db_add_history(uid, "Nạp tiền", None, 0, amt)
+            sync_send_channel_notify(f"💸 **CỘNG TIỀN THÀNH CÔNG**\n👤 Khách hàng: `{uid}`\n💰 Số dư tăng thêm: **+{amt:,}đ**\n✅ *(Xử lý tự động qua Webhook)*")
+            
             asyncio.run_coroutine_threadsafe(bot.send_message(uid, f"✅ Hệ thống đã ghi nhận. Bạn vừa được nạp +{amt:,}đ vào tài khoản thành công!"), loop)
         return jsonify({"status": "ok", "message": "Webhook processed"}), 200
     except Exception as e:
@@ -695,7 +825,6 @@ def webhook():
 def keep_alive_ping():
     while True:
         try:
-            # Gửi request để Render không ngủ, cho phép timeout nhỏ để không block thread
             urllib.request.urlopen("http://127.0.0.1:10000/", timeout=10)
         except Exception as e:
             logging.warning(f"Lỗi ping keep_alive: {e}")
@@ -704,6 +833,9 @@ def keep_alive_ping():
 async def main():
     await bot.start(bot_token=BOT_TOKEN)
     print("--- BOT IS STARTED AND ONLINE ---")
+    
+    # Kích hoạt background task tự động dọn rác DB (xóa lịch sử sau 24h)
+    asyncio.create_task(auto_clean_history())
     
     try:
         clones_res = await asyncio.to_thread(lambda: supabase.table("my_clones").select("*").execute())
