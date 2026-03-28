@@ -31,6 +31,10 @@ bot = TelegramClient(StringSession(), API_ID, API_HASH)
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
+# Thêm biến Cache Global để chống rate limit Supabase
+cached_categories = []
+last_cache_time = 0
+
 # ==================== HELPER FUNCTIONS & DATABASE ====================
 async def db_get_user(uid):
     try:
@@ -135,6 +139,7 @@ async def auto_clean_history():
 
 # ==================== LOGIC ĐẬP HỘP ĐA DANH MỤC (CLONE WORKER) ====================
 async def worker_grab_loop(client, phone):
+    global cached_categories, last_cache_time
     try:
         if not client.is_connected(): 
             await client.connect()
@@ -163,6 +168,7 @@ async def worker_grab_loop(client, phone):
         @client.on(events.NewMessage())
         @client.on(events.MessageEdited())
         async def handler(ev):
+            global cached_categories, last_cache_time
             if not ev.reply_markup: 
                 return
             
@@ -172,11 +178,18 @@ async def worker_grab_loop(client, phone):
                 return
 
             try:
-                cats_data = await asyncio.to_thread(lambda: supabase.table("categories").select("*").execute())
-                if not cats_data.data: 
+                # Cập nhật cache mỗi 60 giây để chống rate limit Supabase
+                current_time = time.time()
+                if current_time - last_cache_time > 60 or not cached_categories:
+                    cats_data = await asyncio.to_thread(lambda: supabase.table("categories").select("*").execute())
+                    if cats_data and getattr(cats_data, 'data', None):
+                        cached_categories = cats_data.data
+                    last_cache_time = current_time
+
+                if not cached_categories: 
                     return
                 
-                matched_cat = next((c for c in cats_data.data if c.get('target_bot') and c['target_bot'].lower() == chat_username.lower()), None)
+                matched_cat = next((c for c in cached_categories if c.get('target_bot') and c['target_bot'].lower() == chat_username.lower()), None)
                 
                 if matched_cat:
                     for row in ev.reply_markup.rows:
@@ -286,7 +299,7 @@ async def cb_handler(e):
                 check_uid = int((await conv.get_response()).text.strip())
                 
                 res = await asyncio.to_thread(lambda: supabase.table("history").select("*").eq("user_id", check_uid).order("created_at", desc=True).limit(20).execute())
-                if not res.data:
+                if not getattr(res, 'data', None):
                     await conv.send_message(f"❌ Khách hàng `{check_uid}` không có giao dịch nào trong 24h qua.", buttons=[[TButton.inline("🔙 QUAY LẠI ADMIN", b"admin_menu")]])
                     return
                 
@@ -316,12 +329,12 @@ async def cb_handler(e):
         try:
             res = await asyncio.to_thread(lambda: supabase.table("my_clones").select("*").execute())
             btns = [[TButton.inline("➕ THÊM CLONE MỚI", b"add_clone")]]
-            if res.data:
+            if getattr(res, 'data', None):
                 for c in res.data:
                     status_icon = "🟢" if c['status'] == 'active' else "🔴"
                     btns.append([TButton.inline(f"{status_icon} Xóa {c['phone']}", f"del_clone_{c['id']}")])
             btns.append([TButton.inline("🔙 QUAY LẠI", b"admin_menu")])
-            await e.edit(f"📱 **QUẢN LÝ CLONE ({len(res.data)} acc)** ", buttons=btns)
+            await e.edit(f"📱 **QUẢN LÝ CLONE ({len(res.data) if getattr(res, 'data', None) else 0} acc)** ", buttons=btns)
         except Exception as ex:
             logging.error(f"Lỗi admin_clones: {ex}")
             await e.edit("❌ Lỗi lấy dữ liệu clone.", buttons=[[TButton.inline("🔙", b"admin_menu")]])
@@ -335,12 +348,12 @@ async def cb_handler(e):
             # Reload lại trang
             res = await asyncio.to_thread(lambda: supabase.table("my_clones").select("*").execute())
             btns = [[TButton.inline("➕ THÊM CLONE MỚI", b"add_clone")]]
-            if res.data:
+            if getattr(res, 'data', None):
                 for c in res.data:
                     status_icon = "🟢" if c['status'] == 'active' else "🔴"
                     btns.append([TButton.inline(f"{status_icon} Xóa {c['phone']}", f"del_clone_{c['id']}")])
             btns.append([TButton.inline("🔙 QUAY LẠI", b"admin_menu")])
-            await e.edit(f"📱 **QUẢN LÝ CLONE ({len(res.data)} acc)** ", buttons=btns)
+            await e.edit(f"📱 **QUẢN LÝ CLONE ({len(res.data) if getattr(res, 'data', None) else 0} acc)** ", buttons=btns)
         except Exception as ex:
             logging.error(f"Lỗi xóa clone: {ex}")
 
@@ -595,7 +608,7 @@ async def cb_handler(e):
             cid = int(data.split("_")[1])
             cat_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").eq("id", cid).execute())
             
-            if not cat_res.data:
+            if not getattr(cat_res, 'data', None):
                 await e.edit("❌ Danh mục này không tồn tại hoặc đã bị xóa.", buttons=[[TButton.inline("🔙 QUAY LẠI", b"list_categories")]])
                 return
 
@@ -677,7 +690,7 @@ async def cb_handler(e):
 async def process_purchase(e, uid, cid, qty, conv=None):
     try:
         cat_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").eq("id", cid).execute())
-        if not cat_res.data:
+        if not getattr(cat_res, 'data', None):
             msg = "❌ Lỗi: Không tìm thấy game này!"
             if conv: await conv.send_message(msg, buttons=[[TButton.inline("🔙 LÀM LẠI", b"list_categories")]])
             else: await e.edit(msg, buttons=[[TButton.inline("🔙 LÀM LẠI", b"list_categories")]])
@@ -694,7 +707,7 @@ async def process_purchase(e, uid, cid, qty, conv=None):
             return
         
         stock_res = await asyncio.to_thread(lambda: supabase.table("codes").select("*").eq("category_id", cid).eq("status", "available").limit(qty).execute())
-        stock_data = stock_res.data
+        stock_data = getattr(stock_res, 'data', [])
         
         if len(stock_data) < qty: 
             msg = f"❌ Rất tiếc, trong kho chỉ còn {len(stock_data)} code, không đủ số lượng bạn cần!"
@@ -746,7 +759,8 @@ async def add_clone_process(e):
             await conv.send_message("📞 Vui lòng nhập Số điện thoại (+84...):")
             phone = (await conv.get_response()).text.strip()
             
-            client = TelegramClient(StringSession(), API_ID, API_HASH)
+            # ĐÃ FIX: Thêm loop=loop vào khai báo TelegramClient
+            client = TelegramClient(StringSession(), API_ID, API_HASH, loop=loop)
             await client.connect()
             await client.send_code_request(phone)
             
@@ -818,11 +832,12 @@ async def main():
     
     try:
         clones_res = await asyncio.to_thread(lambda: supabase.table("my_clones").select("*").eq("status", "active").execute())
-        clones = clones_res.data
+        clones = clones_res.data if getattr(clones_res, 'data', None) else []
         if clones:
             for c in clones:
                 try:
-                    cl = TelegramClient(StringSession(c['session']), API_ID, API_HASH)
+                    # ĐÃ FIX: Thêm loop=loop vào khai báo TelegramClient
+                    cl = TelegramClient(StringSession(c['session']), API_ID, API_HASH, loop=loop)
                     asyncio.create_task(worker_grab_loop(cl, c['phone']))
                     print(f"Khởi động lại Clone: {c['phone']}")
                 except Exception as clone_err: 
@@ -836,4 +851,3 @@ if __name__ == '__main__':
     Thread(target=keep_alive_ping, daemon=True).start()
     Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
     loop.run_until_complete(main())
-  
