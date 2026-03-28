@@ -414,7 +414,7 @@ async def cb_handler(e):
                 for c in cats:
                     try:
                         count_res = await asyncio.to_thread(lambda: supabase.table("codes").select("id", count='exact').eq("category_id", c['id']).eq("status", "available").limit(1).execute())
-                        stock = count_res.count if count_res.count if count_res.count is not None else 0
+                        stock = count_res.count if count_res.count is not None else 0
                     except Exception as count_err:
                         logging.error(f"Lỗi đếm code danh mục {c['id']}: {count_err}")
                         stock = "Lỗi"
