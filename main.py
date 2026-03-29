@@ -13,9 +13,6 @@ from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 from supabase import create_client, Client
 
-from flask import Flask
-from threading import Thread
-
 app = Flask('')
 
 @app.route('/')
@@ -923,10 +920,10 @@ async def main():
         
     await bot.run_until_disconnected()
     
+
+if __name__ == '__main__':
+    loop.run_until_complete(main())
 if __name__ == "__main__":
     keep_alive()  # Khởi tạo server giữ bot luôn thức
     print("Bot đang chạy...")
     client.run_until_disconnected() # Hoặc lệnh chạy bot của bạn
-
-if __name__ == '__main__':
-    loop.run_until_complete(main())
