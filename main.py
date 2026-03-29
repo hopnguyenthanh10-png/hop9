@@ -338,7 +338,7 @@ async def cb_handler(e):
     elif data == "contact_admin":
         await e.answer()
         # Thay link tg://user?id= bằng username nếu bạn có, mặc định trỏ về ID của bạn
-        link = f"tg://user?id={ADMIN_ID}" 
+        link = https://t.me/nth_dev" 
         await e.edit(f"📞 **LIÊN HỆ BỘ PHẬN HỖ TRỢ**\n\nNếu gặp lỗi nạp tiền hoặc cần hỗ trợ về code, vui lòng nhắn tin trực tiếp cho Admin tại đây!", buttons=[[TButton.url("💬 BẤM VÀO ĐÂY ĐỂ NHẮN TIN", link)], [TButton.inline("🔙 QUAY LẠI", b"back")]])
 
     # XỬ LÝ MENU ADMIN
