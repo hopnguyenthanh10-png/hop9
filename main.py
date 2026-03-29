@@ -25,7 +25,6 @@ BOT_TOKEN = "8654764187:AAFTnwinFmQbJNIQiAwCN54Zi-1KZn5UJRw"
 STK_MSB = "96886693002613"
 ADMIN_ID = 7816353760 
 
-# ===== ĐÃ THÊM: ĐỒNG BỘ MÚI GIỜ VIỆT NAM (GMT+7) =====
 VN_TZ = timezone(timedelta(hours=7))
 
 logging.basicConfig(level=logging.INFO)
@@ -34,7 +33,6 @@ bot = TelegramClient(StringSession(), API_ID, API_HASH)
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
-# Thêm biến Cache Global để chống rate limit Supabase
 cached_categories = []
 last_cache_time = 0
 
@@ -133,20 +131,19 @@ def sync_db_add_history(uid, action, game_name, qty, amount, codes_list=""):
 async def auto_clean_history():
     while True:
         try:
-            # Xóa các lịch sử cũ hơn 24 giờ (Bao gồm cả code đã mua để bảo mật)
             yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
             await asyncio.to_thread(lambda: supabase.table("history").delete().lt("created_at", yesterday).execute())
         except Exception as e:
             logging.error(f"Lỗi tự động xóa lịch sử cũ: {e}")
-        await asyncio.sleep(3600) # Cứ 1 tiếng quét dọn 1 lần
+        await asyncio.sleep(3600) 
 
-# ===== ĐÃ THÊM: TASK TỰ ĐỘNG PHÁT THƯỞNG TOP NẠP VÀO 23:59 =====
+# ===== ĐÃ CẬP NHẬT: PHÁT THƯỞNG TOP 3 VÀ RESET VÀO CUỐI NGÀY =====
 async def auto_reward_top_daily():
     while True:
         try:
             now_vn = datetime.now(VN_TZ)
-            # Chạy phát thưởng vào lúc 23:59:00 VN hàng ngày
-            target_time = now_vn.replace(hour=23, minute=59, second=0, microsecond=0)
+            # Chạy phát thưởng vào lúc 23:59:50 VN hàng ngày (Gần sát lúc hết ngày)
+            target_time = now_vn.replace(hour=23, minute=59, second=50, microsecond=0)
             if now_vn > target_time:
                 target_time += timedelta(days=1)
             
@@ -154,10 +151,11 @@ async def auto_reward_top_daily():
             await asyncio.sleep(wait_seconds)
             
             # Bắt đầu phát thưởng
-            reward_str = await db_get_setting("TOP_REWARD_AMOUNT", "0")
-            reward_amt = int(reward_str)
+            t1 = int(await db_get_setting("TOP1_REWARD", "0"))
+            t2 = int(await db_get_setting("TOP2_REWARD", "0"))
+            t3 = int(await db_get_setting("TOP3_REWARD", "0"))
             
-            if reward_amt > 0:
+            if t1 > 0 or t2 > 0 or t3 > 0:
                 start_of_day = datetime.now(VN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
                 start_iso = start_of_day.astimezone(timezone.utc).isoformat()
                 
@@ -171,24 +169,31 @@ async def auto_reward_top_daily():
                     
                     sorted_top = sorted(top_users.items(), key=lambda x: x[1], reverse=True)
                     if sorted_top:
-                        top1_uid = sorted_top[0][0]
-                        top1_deposit = sorted_top[0][1]
+                        noti_text = f"🎉 **CHÚC MỪNG TOP 3 NẠP NGÀY {datetime.now(VN_TZ).strftime('%d/%m/%Y')}** 🎉\n━━━━━━━━━━━━━━━━━━\n"
+                        rewards = [t1, t2, t3]
+                        medals = ["🥇", "🥈", "🥉"]
                         
-                        # Cộng tiền cho TOP 1
-                        user = await db_get_user(top1_uid)
-                        await asyncio.to_thread(lambda: supabase.table("users").update({"balance": user['balance'] + reward_amt}).eq("user_id", top1_uid).execute())
+                        has_winner = False
+                        for i in range(min(3, len(sorted_top))):
+                            uid = sorted_top[i][0]
+                            deposit = sorted_top[i][1]
+                            rew = rewards[i]
+                            
+                            if rew > 0:
+                                has_winner = True
+                                user = await db_get_user(uid)
+                                await asyncio.to_thread(lambda: supabase.table("users").update({"balance": user['balance'] + rew}).eq("user_id", uid).execute())
+                                
+                                noti_text += f"{medals[i]} TOP {i+1}: `{uid}`\n"
+                                noti_text += f"💰 Nạp: **{deposit:,}đ** | 🎁 Thưởng: **+{rew:,}đ**\n\n"
+                                
+                                try:
+                                    await bot.send_message(uid, f"🎊 **CHÚC MỪNG BẠN ĐẠT {medals[i]} TOP {i+1} NẠP NGÀY!**\nPhần thưởng **+{rew:,}đ** đã được tự động cộng vào số dư.")
+                                except: pass
                         
-                        # ĐÃ THÊM: Thông báo đã phát thưởng TOP
-                        noti_text = (f"🎉 **CHÚC MỪNG TOP 1 NẠP NGÀY {datetime.now(VN_TZ).strftime('%d/%m/%Y')}** 🎉\n\n"
-                                     f"🥇 Người chơi ID: `{top1_uid}`\n"
-                                     f"💰 Tổng nạp: **{top1_deposit:,}đ**\n"
-                                     f"🎁 Phần thưởng: **+{reward_amt:,}đ** đã được cộng thẳng vào tài khoản!\n\n"
-                                     f"*(Hệ thống tự động chốt và phát thưởng TOP 1 vào 23:59 mỗi ngày)*")
-                        
-                        await send_channel_notify(noti_text)
-                        try:
-                            await bot.send_message(top1_uid, noti_text)
-                        except: pass
+                        if has_winner:
+                            noti_text += "*(Hệ thống tự động chốt, reset và phát thưởng vào cuối ngày!)*"
+                            await send_channel_notify(noti_text)
         except Exception as e:
             logging.error(f"Lỗi task phát thưởng top: {e}")
         
@@ -202,8 +207,7 @@ async def worker_grab_loop(client, phone):
             await client.connect()
             
         if not await client.is_user_authorized():
-            logging.error(f"Clone {phone} đã chết session (bị đăng xuất).")
-            # Cập nhật trạng thái clone trong DB
+            logging.error(f"Clone {phone} đã chết session.")
             await asyncio.to_thread(lambda: supabase.table("my_clones").update({"status": "dead"}).eq("phone", phone).execute())
             await bot.send_message(ADMIN_ID, f"⚠️ **CẢNH BÁO CLONE CHẾT**\nClone `{phone}` đã bị văng session. Vui lòng nạp lại!")
             return
@@ -218,7 +222,7 @@ async def worker_grab_loop(client, phone):
                             await client.send_message(c['target_bot'], "/start")
                             await asyncio.sleep(1.5) 
                         except Exception as start_err:
-                            logging.warning(f"Clone {phone} không thể gửi /start tới {c['target_bot']}: {start_err}")
+                            logging.warning(f"Clone {phone} không thể gửi /start: {start_err}")
         except Exception as e:
             logging.error(f"Lỗi khi auto-start bot mục tiêu cho {phone}: {e}")
 
@@ -235,7 +239,6 @@ async def worker_grab_loop(client, phone):
                 return
 
             try:
-                # Cập nhật cache mỗi 60 giây để chống rate limit Supabase
                 current_time = time.time()
                 if current_time - last_cache_time > 60 or not cached_categories:
                     cats_data = await asyncio.to_thread(lambda: supabase.table("categories").select("*").execute())
@@ -280,9 +283,23 @@ async def worker_grab_loop(client, phone):
                                             "category_id": matched_cat['id']
                                         }).execute())
                                         
+                                        # ĐÃ CẬP NHẬT: CHECK SỐ LƯỢNG CODE HIỆN TẠI VÀ THÔNG BÁO LÊN KÊNH THEO MỐC 20, 40, 60
+                                        try:
+                                            count_res = await asyncio.to_thread(lambda: supabase.table("codes").select("id", count='exact').eq("category_id", matched_cat['id']).eq("status", "available").execute())
+                                            stock = count_res.count if count_res.count is not None else 0
+                                            if stock in [20, 40, 60]:
+                                                await send_channel_notify(
+                                                    f"🔥 **TIN NÓNG - KHO GAME VỪA CẬP NHẬT** 🔥\n\n"
+                                                    f"🎮 Danh mục: **{matched_cat['name']}**\n"
+                                                    f"📦 Số lượng code hiện tại đạt mốc: **{stock} CODE**\n\n"
+                                                    f"👉 Nhanh tay vào Bot để mua ngay kẻo lỡ!"
+                                                )
+                                        except Exception as e:
+                                            logging.error(f"Lỗi đếm code thông báo: {e}")
+
                                         await bot.send_message(
                                             ADMIN_ID, 
-                                            f"🎊 **NHẬN CODE MỚI!** \n🎮 Danh mục: **{matched_cat['name']}** \n📱 Clone: `{phone}`\n🔑 Code: `{code_found}`"
+                                            f"🎊 **NHẬN CODE MỚI!** \n🎮 Danh mục: **{matched_cat['name']}** \n📱 Clone: `{phone}`\n🔑 Code: `{code_found}`\n📦 Tồn kho hiện tại: {stock}"
                                         )
                                         return
                                 except Exception as e:
@@ -310,7 +327,7 @@ def main_btns(uid):
     btns = [
         [TButton.inline("🛒 DANH MỤC GAME", b"list_categories")],
         [TButton.inline("🏦 NẠP TIỀN", b"dep_menu"), TButton.inline("🕒 LỊCH SỬ GIAO DỊCH", b"history")],
-        [TButton.inline("📞 LIÊN HỆ ADMIN", b"contact_admin")] # ĐÃ THÊM: Nút liên hệ Admin
+        [TButton.inline("📞 LIÊN HỆ ADMIN", b"contact_admin")]
     ]
     if uid == ADMIN_ID:
         btns.append([TButton.inline("👑 QUẢN TRỊ ADMIN", b"admin_menu")])
@@ -327,21 +344,18 @@ async def cb_handler(e):
     uid = e.sender_id
     data = e.data.decode()
 
-    # XỬ LÝ NÚT TRANG CHỦ
     if data == "back":
         await e.answer() 
         user = await db_get_user(uid)
         text = await main_menu_text(user)
         await e.edit(text, buttons=main_btns(uid))
 
-    # ĐÃ THÊM: XỬ LÝ NÚT LIÊN HỆ ADMIN
     elif data == "contact_admin":
         await e.answer()
-        # Thay link tg://user?id= bằng username nếu bạn có, mặc định trỏ về ID của bạn
-        link = https://t.me/nth_dev" 
+        # ĐÃ CẬP NHẬT: Lấy link admin từ Database
+        link = await db_get_setting("ADMIN_CONTACT_LINK", "https://t.me/nth_dev")
         await e.edit(f"📞 **LIÊN HỆ BỘ PHẬN HỖ TRỢ**\n\nNếu gặp lỗi nạp tiền hoặc cần hỗ trợ về code, vui lòng nhắn tin trực tiếp cho Admin tại đây!", buttons=[[TButton.url("💬 BẤM VÀO ĐÂY ĐỂ NHẮN TIN", link)], [TButton.inline("🔙 QUAY LẠI", b"back")]])
 
-    # XỬ LÝ MENU ADMIN
     elif data == "admin_menu":
         await e.answer() 
         if uid != ADMIN_ID: 
@@ -349,13 +363,12 @@ async def cb_handler(e):
         btns = [
             [TButton.inline("📂 QUẢN LÝ DANH MỤC", b"admin_cats"), TButton.inline("📱 QUẢN LÝ CLONE", b"admin_clones")],
             [TButton.inline("⚙️ CÀI ĐẶT CHUNG", b"admin_settings"), TButton.inline("💰 CỘNG/TRỪ TIỀN", b"admin_money")],
-            [TButton.inline("🕵️ CHECK LỊCH SỬ GD", b"admin_check_history"), TButton.inline("🏆 TOP NẠP NGÀY", b"admin_top_dep")], # ĐÃ THÊM nút TOP
-            [TButton.inline("📢 GỬI THÔNG BÁO TỚI KÊNH", b"admin_send_noti")], # ĐÃ THÊM chức năng thông báo broadcast
+            [TButton.inline("🕵️ CHECK LỊCH SỬ GD", b"admin_check_history"), TButton.inline("🏆 TOP NẠP NGÀY", b"admin_top_dep")], 
+            [TButton.inline("📢 GỬI THÔNG BÁO TỚI KÊNH", b"admin_send_noti")], 
             [TButton.inline("🔙 TRANG CHỦ", b"back")]
         ]
         await e.edit("👨‍💻 **BẢNG ĐIỀU KHIỂN ADMIN** ", buttons=btns)
 
-    # ĐÃ THÊM: XỬ LÝ GỬI THÔNG BÁO TỚI KÊNH
     elif data == "admin_send_noti":
         await e.answer()
         await e.delete()
@@ -368,12 +381,15 @@ async def cb_handler(e):
             except Exception as ex:
                 await conv.send_message("❌ Lỗi gửi thông báo hoặc hết thời gian.", buttons=[[TButton.inline("🔙 QUAY LẠI ADMIN", b"admin_menu")]])
 
-    # ĐÃ THÊM: XỬ LÝ TOP NẠP NGÀY
+    # ĐÃ CẬP NHẬT: XỬ LÝ TOP NẠP NGÀY CHO 3 TOP
     elif data == "admin_top_dep":
         await e.answer()
         if uid != ADMIN_ID: return
         try:
-            reward = await db_get_setting("TOP_REWARD_AMOUNT", "100000")
+            t1 = await db_get_setting("TOP1_REWARD", "0")
+            t2 = await db_get_setting("TOP2_REWARD", "0")
+            t3 = await db_get_setting("TOP3_REWARD", "0")
+            
             now_vn = datetime.now(VN_TZ)
             start_of_day = now_vn.replace(hour=0, minute=0, second=0, microsecond=0)
             start_iso = start_of_day.astimezone(timezone.utc).isoformat()
@@ -388,7 +404,9 @@ async def cb_handler(e):
             sorted_top = sorted(top_users.items(), key=lambda x: x[1], reverse=True)
             
             txt = f"🏆 **BẢNG XẾP HẠNG TOP NẠP NGÀY ({now_vn.strftime('%d/%m/%Y')})**\n━━━━━━━━━━━━\n"
-            txt += f"🎁 Cài đặt thưởng TOP 1 hiện tại: **{int(reward):,}đ**\n\n"
+            txt += f"🎁 Thưởng TOP 1: **{int(t1):,}đ**\n"
+            txt += f"🎁 Thưởng TOP 2: **{int(t2):,}đ**\n"
+            txt += f"🎁 Thưởng TOP 3: **{int(t3):,}đ**\n\n"
             
             if not sorted_top:
                 txt += "❌ Hôm nay chưa có ai nạp tiền."
@@ -398,7 +416,7 @@ async def cb_handler(e):
                     txt += f"{medal} | ID: `{u_id}` - Nạp: **{amt:,}đ**\n"
             
             btns = [
-                [TButton.inline("⚙️ CHỈNH TIỀN THƯỞNG TOP 1", b"set_top_reward")],
+                [TButton.inline("⚙️ CHỈNH TIỀN THƯỞNG 3 TOP", b"set_top_reward")],
                 [TButton.inline("🔙 QUAY LẠI", b"admin_menu")]
             ]
             await e.edit(txt, buttons=btns)
@@ -406,23 +424,36 @@ async def cb_handler(e):
             logging.error(f"Lỗi admin_top_dep: {ex}")
             await e.edit("❌ Lỗi lấy dữ liệu top nạp.", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_menu")]])
 
-    # ĐÃ THÊM: XỬ LÝ ADMIN CHỈNH TIỀN THƯỞNG TOP
+    # ĐÃ CẬP NHẬT: XỬ LÝ ADMIN CHỈNH TIỀN THƯỞNG TOP 3 & THÔNG BÁO LÊN KÊNH
     elif data == "set_top_reward":
         await e.answer()
         await e.delete()
         async with bot.conversation(uid) as conv:
             try:
-                await conv.send_message("💰 Nhập số tiền thưởng cho TOP 1 nạp ngày (VD: 100000, nhập 0 để tắt):")
+                await conv.send_message("💰 Nhập số tiền thưởng cho TOP 1, TOP 2, TOP 3 cách nhau bởi dấu cách.\nVí dụ: `100000 50000 20000`\n(Nhập 0 0 0 để tắt thưởng):")
                 response = await conv.get_response()
-                if response.text.strip().isdigit():
-                    await db_set_setting("TOP_REWARD_AMOUNT", response.text.strip())
-                    await conv.send_message("✅ Đã cập nhật tiền thưởng TOP 1 thành công!", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_menu")]])
+                parts = response.text.strip().split()
+                
+                if len(parts) == 3 and all(p.isdigit() for p in parts):
+                    await db_set_setting("TOP1_REWARD", parts[0])
+                    await db_set_setting("TOP2_REWARD", parts[1])
+                    await db_set_setting("TOP3_REWARD", parts[2])
+                    await conv.send_message("✅ Đã cập nhật tiền thưởng TOP thành công!", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_menu")]])
+                    
+                    # Gửi thông báo tự động lên kênh khi đổi giá
+                    await send_channel_notify(
+                        f"⚙️ **THÔNG BÁO CẬP NHẬT THƯỞNG TOP NẠP** ⚙️\n"
+                        f"Admin vừa thay đổi mức phần thưởng cho sự kiện TOP NẠP NGÀY. Giải thưởng mới như sau:\n\n"
+                        f"🥇 TOP 1: **+{int(parts[0]):,}đ**\n"
+                        f"🥈 TOP 2: **+{int(parts[1]):,}đ**\n"
+                        f"🥉 TOP 3: **+{int(parts[2]):,}đ**\n\n"
+                        f"*(Hệ thống sẽ tự động chốt bảng xếp hạng và phát thưởng vào cuối ngày!)*"
+                    )
                 else:
-                    await conv.send_message("❌ Vui lòng nhập số hợp lệ!", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_menu")]])
+                    await conv.send_message("❌ Vui lòng nhập đúng định dạng gồm 3 số viết cách nhau!", buttons=[[TButton.inline("🔙 QUAY LẠI", b"admin_menu")]])
             except Exception:
                 pass
 
-    # XỬ LÝ ADMIN CHECK LỊCH SỬ
     elif data == "admin_check_history":
         await e.answer()
         await e.delete()
@@ -439,7 +470,6 @@ async def cb_handler(e):
                 txt = f"🕵️ **LỊCH SỬ CỦA USER: `{check_uid}`**\n━━━━━━━━━━━━━━━━━━\n"
                 for h in res.data:
                     dt = datetime.fromisoformat(h['created_at'].replace('Z', '+00:00'))
-                    # ĐÃ FIX: Chỉnh giờ về múi giờ Việt Nam
                     time_str = dt.astimezone(VN_TZ).strftime('%H:%M %d/%m')
                     if h['action'] == "Nạp tiền":
                         txt += f"🔹 `{time_str}` | Nạp tiền: **+{h['amount']:,}đ**\n"
@@ -455,7 +485,6 @@ async def cb_handler(e):
                 logging.error(f"Lỗi admin check lịch sử: {ex}")
                 await conv.send_message("❌ Lỗi truy xuất cơ sở dữ liệu!", buttons=[[TButton.inline("🔙 QUAY LẠI ADMIN", b"admin_menu")]])
 
-    # XỬ LÝ QUẢN LÝ CLONE
     elif data == "admin_clones":
         await e.answer()
         if uid != ADMIN_ID: 
@@ -490,18 +519,21 @@ async def cb_handler(e):
         except Exception as ex:
             logging.error(f"Lỗi xóa clone: {ex}")
 
-    # XỬ LÝ CÀI ĐẶT
+    # ĐÃ CẬP NHẬT: Thêm nút Sửa link liên hệ
     elif data == "admin_settings":
         await e.answer()
         if uid != ADMIN_ID: 
             return
         intro = await db_get_setting("BOT_INTRO", "Chưa cài đặt")
         channel = await db_get_setting("NOTIFY_CHANNEL_ID", "Chưa cài đặt")
+        admin_link = await db_get_setting("ADMIN_CONTACT_LINK", "Chưa cài đặt")
         txt = (f"⚙️ **CÀI ĐẶT HỆ THỐNG** \n\n"
                f"1️⃣ **Lời chào:** {intro}\n"
-               f"2️⃣ **ID Kênh thông báo:** `{channel}`")
+               f"2️⃣ **ID Kênh thông báo:** `{channel}`\n"
+               f"3️⃣ **Link liên hệ:** {admin_link}")
         btns = [
             [TButton.inline("SỬA LỜI CHÀO", b"set_intro"), TButton.inline("SỬA KÊNH THÔNG BÁO", b"set_channel")],
+            [TButton.inline("SỬA LINK LIÊN HỆ", b"set_contact_link")],
             [TButton.inline("🔙 QUAY LẠI", b"admin_menu")]
         ]
         await e.edit(txt, buttons=btns)
@@ -529,8 +561,19 @@ async def cb_handler(e):
                 await conv.send_message("✅ Đã cập nhật thành công!", buttons=[[TButton.inline("🔙 CÀI ĐẶT", b"admin_settings")]])
             except Exception as ex:
                 await conv.send_message("❌ Đã quá thời gian chờ hoặc có lỗi xảy ra.")
+                
+    elif data == "set_contact_link":
+        await e.answer()
+        await e.delete()
+        async with bot.conversation(uid) as conv:
+            try:
+                await conv.send_message("📞 Nhập Link liên hệ Admin mới (Ví dụ: https://t.me/admin_username):")
+                response = await conv.get_response()
+                await db_set_setting("ADMIN_CONTACT_LINK", response.text.strip())
+                await conv.send_message("✅ Đã cập nhật Link liên hệ thành công!", buttons=[[TButton.inline("🔙 CÀI ĐẶT", b"admin_settings")]])
+            except Exception:
+                await conv.send_message("❌ Đã quá thời gian chờ hoặc có lỗi xảy ra.")
 
-    # XỬ LÝ QUẢN LÝ DANH MỤC (Đã fix lỗi thụt lề dòng chữ từ bạn gửi)
     elif data == "admin_cats":
         await e.answer()
         if uid != ADMIN_ID: 
@@ -601,7 +644,7 @@ async def cb_handler(e):
             txt = (f"🎮 **{cat['name']}** \n━━━━━━━━━━━━\n"
                    f"📝 {cat['description']}\n\n"
                    f"💵 Giá bán: **{cat['price']:,}đ** \n"
-                   f"📦 Tồn kho hiện tại: **{stock}** code")
+                   f"📦 Tồn kho hiện     tại: **{stock}** code")
             
             btns = [
                 [TButton.inline("🛒 MUA 1 CODE", f"buy_{cid}_1")],
@@ -634,7 +677,6 @@ async def cb_handler(e):
                f"*(Vui lòng bấm nút mở mã QR bên dưới hoặc chuyển khoản đúng nội dung để được cộng tiền tự động 24/7)*")
         await e.edit(txt, buttons=[[TButton.url("🖼 BẤM VÀO ĐÂY ĐỂ MỞ MÃ QR", qr)], [TButton.inline("🔙 QUAY LẠI", b"dep_menu")]])
 
-# Hàm phụ trợ xử lý mua code dùng chung cho buy_ và buycustom_
 async def process_purchase(e, uid, cid, qty, conv=None):
     try:
         cat_res = await asyncio.to_thread(lambda: supabase.table("categories").select("*").eq("id", cid).execute())
@@ -663,10 +705,8 @@ async def process_purchase(e, uid, cid, qty, conv=None):
             else: await bot.send_message(uid, msg)
             return
         
-        # Trừ tiền 
         await asyncio.to_thread(lambda: supabase.table("users").update({"balance": user['balance'] - cost}).eq("user_id", uid).execute())
 
-        # Gom code và gửi
         res_text = f"✅ **MUA THÀNH CÔNG {qty} CODE {cat['name']}!**\n\n"
         codes_str_db = ""
         for c in stock_data:
@@ -674,7 +714,6 @@ async def process_purchase(e, uid, cid, qty, conv=None):
             res_text += f"`{c['code']}`\n"
             codes_str_db += f"{c['code']} | "
             
-        # Lưu lịch sử KÈM CODE & Gửi thông báo Kênh
         await db_add_history(uid, "Mua Code", cat['name'], qty, cost, codes_str_db.strip(" | "))
         await send_channel_notify(
             f"🛒 **GIAO DỊCH MUA CODE THÀNH CÔNG**\n"
@@ -725,7 +764,6 @@ async def add_clone_process(e):
             await asyncio.to_thread(lambda: supabase.table("my_clones").insert({"phone": phone, "session": ss, "status": "active"}).execute())
             await conv.send_message("✅ Quá trình thêm Clone hoàn tất và thành công!", buttons=[[TButton.inline("🔙 QUẢN LÝ CLONE", b"admin_clones")]])
             
-            # Khởi động Clone ngay lập tức
             asyncio.create_task(worker_grab_loop(client, phone))
             
         except Exception as ex:
@@ -782,10 +820,7 @@ async def main():
     await bot.start(bot_token=BOT_TOKEN)
     print("--- BOT IS STARTED AND ONLINE ---")
     
-    # Kích hoạt background task tự động dọn rác DB
     asyncio.create_task(auto_clean_history())
-    
-    # ĐÃ THÊM: Kích hoạt background task tự động trao thưởng Top nạp ngày
     asyncio.create_task(auto_reward_top_daily())
     
     try:
