@@ -13,6 +13,9 @@ from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 from supabase import create_client, Client
 
+# ---> THÊM: CẤU HÌNH GIỜ VIỆT NAM (GMT+7)
+VN_TZ = timezone(timedelta(hours=7))
+
 # ==================== CẤU HÌNH HỆ THỐNG CƠ BẢN ====================
 SUPABASE_URL = "https://npjjarsmvmqvhdnkvtxc.supabase.co" 
 SUPABASE_KEY = "sb_publishable_gVXyT92FL0XpsiiEcerYFQ_RXE3n0ke"
@@ -253,6 +256,7 @@ def main_btns(uid):
     btns = [
         [TButton.inline("🛒 DANH MỤC GAME", b"list_categories")],
         [TButton.inline("🏦 NẠP TIỀN", b"dep_menu"), TButton.inline("🕒 LỊCH SỬ GIAO DỊCH", b"history")],
+        [TButton.inline("🏆 BẢNG XẾP HẠNG (TOP)", b"top_users")], # ---> THÊM NÚT TOP VÀO MAIN MENU
     ]
     if uid == ADMIN_ID:
         btns.append([TButton.inline("👑 QUẢN TRỊ ADMIN", b"admin_menu")])
@@ -276,6 +280,27 @@ async def cb_handler(e):
         text = await main_menu_text(user)
         await e.edit(text, buttons=main_btns(uid))
 
+    # ---> THÊM: LOGIC XEM TOP NGƯỜI CHƠI
+    elif data == "top_users":
+        await e.answer()
+        try:
+            # Lấy top 10 theo số dư (balance) để ko cần đổi DB. (Nếu ae dùng total_deposited thì sửa chữ "balance" thành "total_deposited")
+            res = await asyncio.to_thread(lambda: supabase.table("users").select("*").order("balance", desc=True).limit(10).execute())
+            if not getattr(res, 'data', None):
+                await e.edit("🏆 Hệ thống chưa có dữ liệu TOP.", buttons=[[TButton.inline("🔙 QUAY LẠI", b"back")]])
+                return
+            
+            txt = "🏆 **BẢNG XẾP HẠNG ĐẠI GIA (TOP)** 🏆\n━━━━━━━━━━━━━━━━━━\n"
+            medals = ["🥇", "🥈", "🥉", "🏅", "🏅", "🏅", "🏅", "🏅", "🏅", "🏅"]
+            for i, u in enumerate(res.data):
+                txt += f"{medals[i]} ID: `{u['user_id']}` - Điểm/Số dư: **{u['balance']:,}**\n"
+            txt += "━━━━━━━━━━━━━━━━━━\n🕒 Cập nhật lúc: " + datetime.now(VN_TZ).strftime('%H:%M %d/%m/%Y')
+            
+            await e.edit(txt, buttons=[[TButton.inline("🔙 QUAY LẠI TRANG CHỦ", b"back")]])
+        except Exception as ex:
+            logging.error(f"Lỗi xem TOP: {ex}")
+            await e.edit("❌ Lỗi tải bảng xếp hạng.", buttons=[[TButton.inline("🔙 QUAY LẠI", b"back")]])
+
     # XỬ LÝ MENU ADMIN
     elif data == "admin_menu":
         await e.answer() 
@@ -285,9 +310,32 @@ async def cb_handler(e):
             [TButton.inline("📂 QUẢN LÝ DANH MỤC", b"admin_cats"), TButton.inline("📱 QUẢN LÝ CLONE", b"admin_clones")],
             [TButton.inline("⚙️ CÀI ĐẶT CHUNG", b"admin_settings"), TButton.inline("💰 CỘNG/TRỪ TIỀN", b"admin_money")],
             [TButton.inline("🕵️ CHECK LỊCH SỬ GD", b"admin_check_history")],
+            [TButton.inline("🏆 BẮN THÔNG BÁO TOP KÊNH", b"admin_notify_top")], # ---> THÊM NÚT THÔNG BÁO TOP CHO ADMIN
             [TButton.inline("🔙 TRANG CHỦ", b"back")]
         ]
         await e.edit("👨‍💻 **BẢNG ĐIỀU KHIỂN ADMIN** ", buttons=btns)
+
+    # ---> THÊM: LOGIC ADMIN BẮN THÔNG BÁO TOP LÊN KÊNH
+    elif data == "admin_notify_top":
+        await e.answer()
+        if uid != ADMIN_ID: return
+        try:
+            res = await asyncio.to_thread(lambda: supabase.table("users").select("*").order("balance", desc=True).limit(5).execute())
+            if not getattr(res, 'data', None):
+                await e.edit("❌ Chưa có dữ liệu TOP để thông báo.", buttons=[[TButton.inline("🔙 QUAY LẠI ADMIN", b"admin_menu")]])
+                return
+            
+            txt = "🏆 **VINH DANH TOP ĐẠI GIA HÔM NAY** 🏆\n━━━━━━━━━━━━━━━━━━\n"
+            medals = ["🥇", "🥈", "🥉", "🏅", "🏅"]
+            for i, u in enumerate(res.data):
+                txt += f"{medals[i]} Người chơi: `{u['user_id']}` - Điểm/Số dư: **{u['balance']:,}**\n"
+            txt += "━━━━━━━━━━━━━━━━━━\n🎉 Cảm ơn các anh em đã luôn đồng hành và ủng hộ hệ thống!"
+            
+            await send_channel_notify(txt)
+            await e.edit("✅ Đã bắn thông báo TOP lên kênh thành công!", buttons=[[TButton.inline("🔙 QUAY LẠI ADMIN", b"admin_menu")]])
+        except Exception as ex:
+            logging.error(f"Lỗi bắn thông báo TOP: {ex}")
+            await e.edit("❌ Lỗi khi gửi thông báo.", buttons=[[TButton.inline("🔙", b"admin_menu")]])
 
     # XỬ LÝ ADMIN CHECK LỊCH SỬ
     elif data == "admin_check_history":
@@ -306,7 +354,7 @@ async def cb_handler(e):
                 txt = f"🕵️ **LỊCH SỬ CỦA USER: `{check_uid}`**\n━━━━━━━━━━━━━━━━━━\n"
                 for h in res.data:
                     dt = datetime.fromisoformat(h['created_at'].replace('Z', '+00:00'))
-                    time_str = dt.astimezone().strftime('%H:%M %d/%m')
+                    time_str = dt.astimezone(VN_TZ).strftime('%H:%M %d/%m') # ---> FIX GIỜ VN
                     if h['action'] == "Nạp tiền":
                         txt += f"🔹 `{time_str}` | Nạp tiền: **+{h['amount']:,}đ**\n"
                     else:
@@ -561,7 +609,7 @@ async def cb_handler(e):
             txt = "🕒 **LỊCH SỬ GIAO DỊCH (24H QUA)**\n━━━━━━━━━━━━━━━━━━\n"
             for h in hist_data:
                 dt = datetime.fromisoformat(h['created_at'].replace('Z', '+00:00'))
-                time_str = dt.astimezone().strftime('%H:%M %d/%m')
+                time_str = dt.astimezone(VN_TZ).strftime('%H:%M %d/%m') # ---> FIX GIỜ VN
                 
                 if h['action'] == "Nạp tiền":
                     txt += f"🔹 `{time_str}` | Nạp tiền: **+{h['amount']:,}đ**\n"
