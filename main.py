@@ -30,9 +30,9 @@ def keep_alive():
 VN_TZ = timezone(timedelta(hours=7))
 
 # ---> THÊM: CẤU HÌNH PHẦN THƯỞNG CHO TOP NẠP NGÀY
-TOP1_REWARD = 50000
-TOP2_REWARD = 30000
-TOP3_REWARD = 10000
+TOP1_REWARD = 5000
+TOP2_REWARD = 2500
+TOP3_REWARD = 1000
 last_reward_date = ""
 
 # ==================== CẤU HÌNH HỆ THỐNG CƠ BẢN ====================
