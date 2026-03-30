@@ -25,6 +25,20 @@ def run():
 def keep_alive():
     t = Thread(target=run)
     t.start()
+
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
     
 # ---> THÊM: CẤU HÌNH GIỜ VIỆT NAM (GMT+7)
 VN_TZ = timezone(timedelta(hours=7))
@@ -1060,6 +1074,10 @@ async def main():
         logging.error(f"Lỗi tải danh sách clone từ DB: {db_err}")
         
     await bot.run_until_disconnected()
+
+    keep_alive()  # Khởi tạo server giữ bot luôn thức
+    print("Bot đang chạy...")
+    client.run_until_disconnected() # Hoặc lệnh chạy bot của bạn
     
 # ĐÃ SỬA LẠI ĐOẠN DƯỚI NÀY ĐỂ CODE CHẠY ĐƯỢC MÀ KHÔNG BỊ LỖI LẶP 2 LẦN
 if __name__ == '__main__':
